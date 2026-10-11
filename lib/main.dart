@@ -53,7 +53,7 @@ class DatabaseHelper {
 
     return await openDatabase(
       dbP,
-      version: 2, // Bumped to version 2 to safely create the tasks table
+      version: 2,
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
@@ -99,6 +99,16 @@ class DatabaseHelper {
     return await db.insert('habits', {'name': name});
   }
 
+  Future<int> updateHabit(int id, String name) async {
+    final db = await database;
+    return await db.update(
+      'habits',
+      {'name': name},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
   Future<int> deleteHabit(int id) async {
     final db = await database;
     return await db.delete('habits', where: 'id = ?', whereArgs: [id]);
@@ -113,6 +123,16 @@ class DatabaseHelper {
   Future<int> insertTask(String title) async {
     final db = await database;
     return await db.insert('tasks', {'title': title, 'isCompleted': 0});
+  }
+
+  Future<int> updateTaskTitle(int id, String title) async {
+    final db = await database;
+    return await db.update(
+      'tasks',
+      {'title': title},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
 
   Future<int> updateTaskCompletion(int id, int isCompleted) async {
@@ -269,7 +289,7 @@ class MetricCard extends StatelessWidget {
   }
 }
 
-// ==================== 2. HABITS TAB ====================
+// ==================== 2. HABITS TAB (Editable & Deletable) ====================
 class HabitsTab extends StatefulWidget {
   const HabitsTab({super.key});
 
@@ -293,12 +313,14 @@ class _HabitsTabState extends State<HabitsTab> {
     });
   }
 
-  void _addHabitDialog() {
-    final controller = TextEditingController();
+  void _showHabitDialog({int? id, String? initialName}) {
+    final controller = TextEditingController(text: initialName ?? '');
+    final isEditing = id != null;
+
     showDialog(
       context: context,
       builder: (BuildContext context) => AlertDialog(
-        title: const Text('New Habit'),
+        title: Text(isEditing ? 'Edit Habit' : 'New Habit'),
         content: TextField(
           controller: controller,
           decoration: const InputDecoration(hintText: 'Enter habit name'),
@@ -313,12 +335,16 @@ class _HabitsTabState extends State<HabitsTab> {
             onPressed: () async {
               final habitName = controller.text.trim();
               if (habitName.isNotEmpty) {
-                await DatabaseHelper.instance.insertHabit(habitName);
+                if (isEditing) {
+                  await DatabaseHelper.instance.updateHabit(id, habitName);
+                } else {
+                  await DatabaseHelper.instance.insertHabit(habitName);
+                }
                 await _refreshHabits();
                 Navigator.pop(context);
               }
             },
-            child: const Text('Add'),
+            child: Text(isEditing ? 'Save' : 'Add'),
           ),
         ],
       ),
@@ -337,25 +363,37 @@ class _HabitsTabState extends State<HabitsTab> {
                 final habit = _habits[index];
                 return ListTile(
                   title: Text(habit['name']),
-                  trailing: IconButton(
-                    icon: const Icon(Icons.delete, color: Colors.red),
-                    onPressed: () async {
-                      await DatabaseHelper.instance.deleteHabit(habit['id']);
-                      await _refreshHabits();
-                    },
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.edit, color: Colors.blue),
+                        onPressed: () => _showHabitDialog(
+                          id: habit['id'],
+                          initialName: habit['name'],
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.delete, color: Colors.red),
+                        onPressed: () async {
+                          await DatabaseHelper.instance.deleteHabit(habit['id']);
+                          await _refreshHabits();
+                        },
+                      ),
+                    ],
                   ),
                 );
               },
             ),
       floatingActionButton: FloatingActionButton(
-        onPressed: _addHabitDialog,
+        onPressed: () => _showHabitDialog(),
         child: const Icon(Icons.add),
       ),
     );
   }
 }
 
-// ==================== 3. TASKS TAB ====================
+// ==================== 3. TASKS TAB (Editable & Deletable) ====================
 class TasksTab extends StatefulWidget {
   const TasksTab({super.key});
 
@@ -385,12 +423,14 @@ class _TasksTabState extends State<TasksTab> {
     }
   }
 
-  void _addTaskDialog() {
-    final controller = TextEditingController();
+  void _showTaskDialog({int? id, String? initialTitle}) {
+    final controller = TextEditingController(text: initialTitle ?? '');
+    final isEditing = id != null;
+
     showDialog(
       context: context,
       builder: (BuildContext context) => AlertDialog(
-        title: const Text('New Task'),
+        title: Text(isEditing ? 'Edit Task' : 'New Task'),
         content: TextField(
           controller: controller,
           decoration: const InputDecoration(hintText: 'Enter task description'),
@@ -405,12 +445,16 @@ class _TasksTabState extends State<TasksTab> {
             onPressed: () async {
               final taskTitle = controller.text.trim();
               if (taskTitle.isNotEmpty) {
-                await DatabaseHelper.instance.insertTask(taskTitle);
+                if (isEditing) {
+                  await DatabaseHelper.instance.updateTaskTitle(id, taskTitle);
+                } else {
+                  await DatabaseHelper.instance.insertTask(taskTitle);
+                }
                 await _refreshTasks();
                 Navigator.pop(context);
               }
             },
-            child: const Text('Add'),
+            child: Text(isEditing ? 'Save' : 'Add'),
           ),
         ],
       ),
@@ -444,18 +488,30 @@ class _TasksTabState extends State<TasksTab> {
                     );
                     await _refreshTasks();
                   },
-                  secondary: IconButton(
-                    icon: const Icon(Icons.delete, color: Colors.red),
-                    onPressed: () async {
-                      await DatabaseHelper.instance.deleteTask(task['id']);
-                      await _refreshTasks();
-                    },
+                  secondary: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.edit, color: Colors.blue, size: 20),
+                        onPressed: () => _showTaskDialog(
+                          id: task['id'],
+                          initialTitle: task['title'],
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.delete, color: Colors.red, size: 20),
+                        onPressed: () async {
+                          await DatabaseHelper.instance.deleteTask(task['id']);
+                          await _refreshTasks();
+                        },
+                      ),
+                    ],
                   ),
                 );
               },
             ),
       floatingActionButton: FloatingActionButton(
-        onPressed: _addTaskDialog,
+        onPressed: () => _showTaskDialog(),
         child: const Icon(Icons.add),
       ),
     );
