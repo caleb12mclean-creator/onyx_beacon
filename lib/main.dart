@@ -53,7 +53,7 @@ class DatabaseHelper {
 
     return await openDatabase(
       dbP,
-      version: 4,
+      version: 4, // Bumped to version 4 for categories and journal/writing studio tables
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
@@ -105,6 +105,7 @@ class DatabaseHelper {
       )
     ''');
 
+    // Insert default finance categories
     final defaultCategories = [
       {'name': 'Housing & Rent', 'type': 'Expense'},
       {'name': 'Groceries', 'type': 'Expense'},
@@ -162,6 +163,10 @@ class DatabaseHelper {
           date TEXT NOT NULL
         )
       ''');
+      // Seed default categories if upgrading
+      await db.insert('finance_categories', {'name': 'Housing & Rent', 'type': 'Expense'});
+      await db.insert('finance_categories', {'name': 'Groceries', 'type': 'Expense'});
+      await db.insert('finance_categories', {'name': 'Salary', 'type': 'Income'});
     }
   }
 
@@ -580,7 +585,7 @@ class _TasksTabState extends State<TasksTab> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Tasks & To-dos')),
+      appBar: AppBar(title: const Text('Tasks & Todos')),
       body: _tasks.isEmpty
           ? const Center(child: Text('No tasks recorded yet. Tap + to add one.'))
           : ListView.builder(
@@ -628,7 +633,7 @@ class _TasksTabState extends State<TasksTab> {
   }
 }
 
-// ==================== 4. FINANCE TAB ====================
+// ==================== 4. FINANCE TAB (Full Ledger + Editable Categories) ====================
 class FinanceTab extends StatefulWidget {
   const FinanceTab({super.key});
 
@@ -1224,6 +1229,7 @@ class _JournalTabState extends State<JournalTab> {
       ),
       body: Column(
         children: [
+          // Filter Chips
           SizedBox(
             height: 60,
             child: ListView(
@@ -1252,6 +1258,7 @@ class _JournalTabState extends State<JournalTab> {
             ),
           ),
           const Divider(height: 1),
+          // Entries List
           Expanded(
             child: filteredEntries.isEmpty
                 ? const Center(child: Text('No writings or journal entries found. Tap + to start drafting.'))
