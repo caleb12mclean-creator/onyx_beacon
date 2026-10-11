@@ -28,10 +28,22 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Disable Xcode Code Signing Requirement
+      - name: Disable Xcode Code Signing Completely
         run: |
+          # Disable code signing requirements in Xcode project file
           sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' ios/Runner.xcodeproj/project.pbxproj
           sed -i '' 's/CODE_SIGN_IDENTITY = "Apple Development";/CODE_SIGN_IDENTITY = "";/g' ios/Runner.xcodeproj/project.pbxproj
+          # Inject flags to disable code signing allowance/requirements entirely
+          python3 -c '
+          path = "ios/Runner.xcodeproj/project.pbxproj"
+          with open(path, "r") as f:
+              content = f.read()
+          # Add CODE_SIGNING_ALLOWED = NO where build settings are defined
+          content = content.replace("isa = XCBuildConfiguration;", "isa = XCBuildConfiguration;\n\t\t\tbuildSettings = {\n\t\t\t\tCODE_SIGNING_ALLOWED = NO;\n\t\t\t};")
+          # A cleaner approach is replacing specific lines or adding keys
+          '
+          # Alternative reliable sed injection for project.pbxproj
+          find ios/Runner.xcodeproj -name "project.pbxproj" -exec sed -i '' 's/ASSETCATALOG_COMPILER_APP_ICON_NAME = AppIcon;/ASSETCATALOG_COMPILER_APP_ICON_NAME = AppIcon;\n\t\t\t\tCODE_SIGNING_ALLOWED = NO;\n\t\t\t\tCODE_SIGNING_REQUIRED = NO;/g' {} +
 
       - name: Build iOS (No Codesign)
         run: flutter build ios --release --no-codesign
