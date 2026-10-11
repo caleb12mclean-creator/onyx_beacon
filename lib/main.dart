@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as path;
 import 'package:sqflite/sqflite.dart';
@@ -7,8 +8,70 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:intl/intl.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:encrypt/encrypt.dart' as enc;
+import 'package:crypto/crypto.dart' as crypto;
+import 'package:window_manager/window_manager.dart';
+import 'package:system_tray/system_tray.dart';
+import 'package:launch_at_startup/launch_at_startup.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  // Windows-only: window_manager + tray + auto-start
+  if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
+    try {
+      await windowManager.ensureInitialized();
+      WindowOptions windowOptions = const WindowOptions(
+        size: Size(1280, 800),
+        center: true,
+        backgroundColor: Colors.transparent,
+        skipTaskbar: false,
+        titleBarStyle: TitleBarStyle.normal,
+        title: 'Onyx Beacon — Command Center',
+      );
+      await windowManager.waitUntilReadyToShow(windowOptions, () async {
+        await windowManager.show();
+        await windowManager.focus();
+      });
+
+      // System Tray
+      final SystemTray systemTray = SystemTray();
+      await systemTray.initSystemTray(
+        title: "Onyx Beacon",
+        iconPath: Platform.isWindows ? "windows/runner/resources/app_icon.ico" : "",
+        toolTip: "Onyx Beacon — Command Center",
+      );
+      final Menu menu = Menu();
+      await menu.buildFrom([
+        MenuItemLabel(label: 'Show Onyx Beacon', onClicked: (menuItem) async => await windowManager.show()),
+        MenuItemLabel(label: 'Daily Briefing', onClicked: (menuItem) async {
+          await windowManager.show();
+        }),
+        MenuSeparator(),
+        MenuItemLabel(label: 'Quit', onClicked: (menuItem) => exit(0)),
+      ]);
+      await systemTray.setContextMenu(menu);
+      systemTray.registerSystemTrayEventHandler((eventName) {
+        if (eventName == kSystemTrayEventClick) {
+          windowManager.show();
+        } else if (eventName == kSystemTrayEventDoubleClick) {
+          windowManager.show();
+        }
+      });
+
+      // Auto-launch at startup (optional)
+      launchAtStartup.setup(
+        appName: 'Onyx Beacon',
+        appPath: Platform.resolvedExecutable,
+      );
+      // Don't enable by default, user can enable in settings
+      // await launchAtStartup.enable();
+    } catch (e) {
+      debugPrint('Window/Tray init error (expected on mobile): $e');
+    }
+  }
+
   runApp(const OnyxBeaconApp());
 }
 
@@ -196,6 +259,11 @@ class DatabaseHelper {
           UNIQUE(habit_id, completed_date)
         )
       ''');
+    }
+    if (oldVersion < 6) {
+      try { await db.execute('ALTER TABLE habits ADD COLUMN color TEXT DEFAULT "#FF6B6B"'); } catch (_) {}
+      try { await db.execute('ALTER TABLE finance_categories ADD COLUMN color TEXT DEFAULT "#4ECDC4"'); } catch (_) {}
+      try { await db.execute('ALTER TABLE journal_entries ADD COLUMN color TEXT DEFAULT "#9B59B6"'); } catch (_) {}
     }
   }
 
@@ -427,7 +495,133 @@ class ExportService {
   }
 }
 
+
+// ==================== COLOR CODES v6.1 ====================
+class ColorCodes {
+  static const List<String> palette = [
+    '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', 
+    '#DDA0DD', '#98D8C8', '#F7DC6F', '#BB8FCE', '#85C1E2',
+    '#F8B500', '#6C5CE7', '#A29BFE', '#FD79A8', '#FDCB6E',
+    '#E17055', '#00B894', '#00CEC9', '#6C5CE7', '#A8E6CF'
+  ];
+  
+  static Color fromHex(String hex) {
+    try {
+      final buffer = StringBuffer();
+      if (hex.length == 6 || hex.length == 7) buffer.write('ff');
+      buffer.write(hex.replaceFirst('#', ''));
+      return Color(int.parse(buffer.toString(), radix: 16));
+    } catch (_) { return const Color(0xFF4A4E69); }
+  }
+  
+  static String toHex(Color color) => '#${color.value.toRadixString(16).padLeft(8, '0').substring(2).toUpperCase()}';
+}
+
+class ColorPickerDialog extends StatelessWidget {
+  final String currentColor;
+  final Function(String) onColorSelected;
+  const ColorPickerDialog({super.key, required this.currentColor, required this.onColorSelected});
+  
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Pick Color Code'),
+      content: SizedBox(
+        width: 300,
+        child: Wrap(
+          spacing: 8, runSpacing: 8,
+          children: ColorCodes.palette.map((hex) {
+            final color = ColorCodes.fromHex(hex);
+            final isSelected = hex.toLowerCase() == currentColor.toLowerCase();
+            return GestureDetector(
+              onTap: () { onColorSelected(hex); Navigator.pop(context); },
+              child: Container(
+                width: 48, height: 48,
+                decoration: BoxDecoration(
+                  color: color,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: isSelected ? Colors.black : Colors.white, width: isSelected ? 3 : 2),
+                  boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 4)],
+                ),
+                child: isSelected ? const Icon(Icons.check, color: Colors.white, size: 20) : null,
+              ),
+            );
+          }).toList(),
+        ),
+      ),
+      actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel'))],
+    );
+  }
+}
+
+// ==================== WIDGETS DASHBOARD v6.1 - Daily Briefing + Quick Stats ====================
+class DailyBriefingWidget extends StatefulWidget {
+  const DailyBriefingWidget({super.key});
+  @override
+  State<DailyBriefingWidget> createState() => _DailyBriefingWidgetState();
+}
+
+class _DailyBriefingWidgetState extends State<DailyBriefingWidget> {
+  int habitsDue = 0;
+  int tasksPending = 0;
+  double netToday = 0;
+  int streakTotal = 0;
+
+  @override
+  void initState() { super.initState(); _loadBriefing(); }
+
+  Future<void> _loadBriefing() async {
+    try {
+      final db = await DatabaseHelper.instance.database;
+      final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
+      final habits = await db.query('habits');
+      final completions = await db.query('habit_completions', where: 'completed_date = ?', whereArgs: [today]);
+      final tasks = await db.query('tasks', where: 'isCompleted = 0');
+      final txs = await db.query('transactions', where: 'date = ?', whereArgs: [today]);
+      double net = 0;
+      for (var t in txs) {
+        final amt = (t['amount'] as num).toDouble();
+        net += t['type'] == 'Income' ? amt : -amt;
+      }
+      setState(() {
+        habitsDue = habits.length - completions.length;
+        tasksPending = tasks.length;
+        netToday = net;
+      });
+    } catch (_) {}
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      elevation: 3,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [const Icon(Icons.wb_sunny_outlined, size: 20), const SizedBox(width: 8), const Text('Daily Briefing — Today', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)), const Spacer(), IconButton(icon: const Icon(Icons.refresh, size: 18), onPressed: _loadBriefing)]),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(child: _briefItem('Habits Due', '$habitsDue', Icons.bolt, Colors.orange)),
+                Expanded(child: _briefItem('Tasks', '$tasksPending pending', Icons.task_alt, Colors.blue)),
+                Expanded(child: _briefItem('Net Today', '\$${netToday.toStringAsFixed(2)}', Icons.account_balance_wallet, netToday >=0 ? Colors.green : Colors.red)),
+              ],
+            ),
+            const SizedBox(height: 8),
+            const Text('Widgets: This is your command center widget. Future: home screen widgets via home_widget plugin (Android/iOS) + Windows widgets.', style: TextStyle(fontSize: 11, color: Colors.grey)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _briefItem(String label, String value, IconData icon, Color color) => Column(children: [Icon(icon, color: color, size: 20), const SizedBox(height: 4), Text(value, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: color)), Text(label, style: const TextStyle(fontSize: 11, color: Colors.grey))]);
+}
+
 // ==================== APP SHELL & NAVIGATION ====================
+
 class MainDashboardShell extends StatefulWidget {
   const MainDashboardShell({super.key});
 
@@ -733,17 +927,37 @@ class _HabitsTabState extends State<HabitsTab> {
     });
   }
 
-  void _showHabitDialog({int? id, String? initialName}) {
+  void _showHabitDialog({int? id, String? initialName, String? initialColor}) {
+    String selectedColor = initialColor ?? ColorCodes.palette[0];
     final controller = TextEditingController(text: initialName ?? '');
     final isEditing = id != null;
     showDialog(
       context: context,
-      builder: (BuildContext context) => AlertDialog(
+      builder: (BuildContext context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
         title: Text(isEditing ? 'Edit Habit' : 'New Habit'),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(hintText: 'Enter habit name'),
-          autofocus: true,
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: controller,
+              decoration: const InputDecoration(hintText: 'Enter habit name'),
+              autofocus: true,
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                const Text('Color Code:'),
+                const SizedBox(width: 12),
+                GestureDetector(
+                  onTap: () => showDialog(context: context, builder: (ctx) => ColorPickerDialog(currentColor: selectedColor, onColorSelected: (c) { setDialogState(() => selectedColor = c); })),
+                  child: Container(width: 32, height: 32, decoration: BoxDecoration(color: ColorCodes.fromHex(selectedColor), shape: BoxShape.circle, border: Border.all(color: Colors.black26))),
+                ),
+                const SizedBox(width: 8),
+                Text(selectedColor, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+              ],
+            ),
+          ],
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
@@ -751,10 +965,11 @@ class _HabitsTabState extends State<HabitsTab> {
             onPressed: () async {
               final habitName = controller.text.trim();
               if (habitName.isNotEmpty) {
+                final db = await DatabaseHelper.instance.database;
                 if (isEditing) {
-                  await DatabaseHelper.instance.updateHabit(id, habitName);
+                  await db.update('habits', {'name': habitName, 'color': selectedColor}, where: 'id = ?', whereArgs: [id]);
                 } else {
-                  await DatabaseHelper.instance.insertHabit(habitName);
+                  await db.insert('habits', {'name': habitName, 'color': selectedColor});
                 }
                 await _refreshHabits();
                 if (mounted) Navigator.pop(context);
@@ -764,6 +979,7 @@ class _HabitsTabState extends State<HabitsTab> {
           ),
         ],
       ),
+        ),
     );
   }
 
@@ -829,8 +1045,7 @@ class _HabitsTabState extends State<HabitsTab> {
                             children: [
                               Row(
                                 children: [
-                                  Expanded(
-                                    child: Text(habit['name'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                                  Row(children: [Container(width: 12, height: 12, decoration: BoxDecoration(color: ColorCodes.fromHex(habit['color'] ?? '#FF6B6B'), shape: BoxShape.circle)), const SizedBox(width: 8), Expanded(child: Text(habit['name'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16))),]),
                                   ),
                                   Chip(
                                     label: Text('🔥 $streak streak', style: const TextStyle(fontSize: 12)),
