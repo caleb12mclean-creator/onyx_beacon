@@ -28,6 +28,11 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Disable Xcode Code Signing Requirement
+        run: |
+          sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' ios/Runner.xcodeproj/project.pbxproj
+          sed -i '' 's/CODE_SIGN_IDENTITY = "Apple Development";/CODE_SIGN_IDENTITY = "";/g' ios/Runner.xcodeproj/project.pbxproj
+
       - name: Build iOS (No Codesign)
         run: flutter build ios --release --no-codesign
 
