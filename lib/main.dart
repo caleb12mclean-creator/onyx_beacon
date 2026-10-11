@@ -14,64 +14,29 @@ import 'package:crypto/crypto.dart' as crypto;
 import 'package:window_manager/window_manager.dart';
 import 'package:system_tray/system_tray.dart';
 import 'package:launch_at_startup/launch_at_startup.dart';
+import 'package:home_widget/home_widget.dart';
+
+Future<void> _initHomeWidget() async {
+  try { await HomeWidget.setAppGroupId('group.onyxbeacon'); } catch(e){ debugPrint('HomeWidget: $e'); }
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
-  // Windows-only: window_manager + tray + auto-start
+  await _initHomeWidget();
   if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
     try {
       await windowManager.ensureInitialized();
-      WindowOptions windowOptions = const WindowOptions(
-        size: Size(1280, 800),
-        center: true,
-        backgroundColor: Colors.transparent,
-        skipTaskbar: false,
-        titleBarStyle: TitleBarStyle.normal,
-        title: 'Onyx Beacon — Command Center',
-      );
-      await windowManager.waitUntilReadyToShow(windowOptions, () async {
-        await windowManager.show();
-        await windowManager.focus();
-      });
-
-      // System Tray
-      final SystemTray systemTray = SystemTray();
-      await systemTray.initSystemTray(
-        title: "Onyx Beacon",
-        iconPath: Platform.isWindows ? "windows/runner/resources/app_icon.ico" : "",
-        toolTip: "Onyx Beacon — Command Center",
-      );
-      final Menu menu = Menu();
-      await menu.buildFrom([
-        MenuItemLabel(label: 'Show Onyx Beacon', onClicked: (menuItem) async => await windowManager.show()),
-        MenuItemLabel(label: 'Daily Briefing', onClicked: (menuItem) async {
-          await windowManager.show();
-        }),
-        MenuSeparator(),
-        MenuItemLabel(label: 'Quit', onClicked: (menuItem) => exit(0)),
-      ]);
-      await systemTray.setContextMenu(menu);
-      systemTray.registerSystemTrayEventHandler((eventName) {
-        if (eventName == kSystemTrayEventClick) {
-          windowManager.show();
-        } else if (eventName == kSystemTrayEventDoubleClick) {
-          windowManager.show();
-        }
-      });
-
-      // Auto-launch at startup (optional)
-      launchAtStartup.setup(
-        appName: 'Onyx Beacon',
-        appPath: Platform.resolvedExecutable,
-      );
-      // Don't enable by default, user can enable in settings
-      // await launchAtStartup.enable();
-    } catch (e) {
-      debugPrint('Window/Tray init error (expected on mobile): $e');
-    }
+      WindowOptions opts = const WindowOptions(size: Size(1280,800), center:true, backgroundColor: Colors.transparent, skipTaskbar:false, titleBarStyle: TitleBarStyle.normal, title: 'Onyx Beacon — Command Center');
+      await windowManager.waitUntilReadyToShow(opts, () async { await windowManager.show(); await windowManager.focus(); });
+      final tray = SystemTray();
+      await tray.initSystemTray(title: "Onyx Beacon", iconPath: Platform.isWindows ? "windows/runner/resources/app_icon.ico" : "", toolTip: "Onyx Beacon — Command Center");
+      final menu = Menu();
+      await menu.buildFrom([MenuItemLabel(label: 'Show Onyx Beacon', onClicked: (_) async => await windowManager.show()), MenuSeparator(), MenuItemLabel(label: 'Quit', onClicked: (_) => exit(0))]);
+      await tray.setContextMenu(menu);
+      tray.registerSystemTrayEventHandler((e){ if(e==kSystemTrayEventClick) windowManager.show(); });
+      launchAtStartup.setup(appName: 'Onyx Beacon', appPath: Platform.resolvedExecutable);
+    } catch(e){ debugPrint('Window/Tray: $e'); }
   }
-
   runApp(const OnyxBeaconApp());
 }
 
@@ -132,7 +97,7 @@ class DatabaseHelper {
 
     return await openDatabase(
       dbP,
-      version: 5,
+      version: 6,
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
@@ -142,7 +107,8 @@ class DatabaseHelper {
     await db.execute('''
       CREATE TABLE habits (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL
+        name TEXT NOT NULL,
+        color TEXT DEFAULT '#FF6B6B'
       )
     ''');
     await db.execute('''
@@ -165,7 +131,8 @@ class DatabaseHelper {
       CREATE TABLE finance_categories (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
-        type TEXT NOT NULL
+        type TEXT NOT NULL,
+        color TEXT DEFAULT '#4ECDC4'
       )
     ''');
     await db.execute('''
@@ -185,7 +152,8 @@ class DatabaseHelper {
         content TEXT NOT NULL,
         category TEXT NOT NULL,
         mood TEXT NOT NULL,
-        date TEXT NOT NULL
+        date TEXT NOT NULL,
+        color TEXT DEFAULT '#9B59B6'
       )
     ''');
 
@@ -448,7 +416,7 @@ class DatabaseHelper {
   }
 }
 
-// ==================== EXPORT UTILITY ====================
+// ==================== EXPORT UTILITY + ENCRYPTED + WIDGETS ====================
 class ExportService {
   static Future<void> exportJson(String fileName, dynamic data) async {
     try {
@@ -456,11 +424,8 @@ class ExportService {
       final file = File(path.join(dir.path, fileName));
       await file.writeAsString(const JsonEncoder.withIndent('  ').convert(data));
       await Share.shareXFiles([XFile(file.path)], text: 'Onyx Beacon Export: $fileName');
-    } catch (e) {
-      debugPrint('Export JSON error: $e');
-    }
+    } catch (e) { debugPrint('Export JSON error: $e'); }
   }
-
   static Future<void> exportTransactionsCsv(List<Map<String, dynamic>> txs) async {
     try {
       final dir = await getApplicationDocumentsDirectory();
@@ -468,109 +433,41 @@ class ExportService {
       final file = File(path.join(dir.path, fileName));
       final buffer = StringBuffer();
       buffer.writeln('id,title,amount,type,category,date');
-      for (var tx in txs) {
-        buffer.writeln('${tx['id']},"${tx['title']}",${tx['amount']},${tx['type']},${tx['category']},${tx['date']}');
-      }
+      for (var tx in txs) { buffer.writeln('${tx['id']},"${tx['title']}",${tx['amount']},${tx['type']},${tx['category']},${tx['date']}'); }
       await file.writeAsString(buffer.toString());
       await Share.shareXFiles([XFile(file.path)], text: 'Onyx Beacon Finance CSV');
-    } catch (e) {
-      debugPrint('Export CSV error: $e');
-    }
+    } catch (e) { debugPrint('Export CSV error: $e'); }
   }
-
   static Future<void> exportJournalJson(List<Map<String, dynamic>> entries) async {
     final fileName = 'writing_hub_${DateFormat('yyyy-MM-dd').format(DateTime.now())}.json';
     await exportJson(fileName, entries);
   }
-
   static Future<void> exportFullBackup() async {
     final allData = await DatabaseHelper.instance.getAllDataForExport();
-    final Map<String, dynamic> backup = {
-      'exported_at': DateTime.now().toIso8601String(),
-      'version': 5,
-      'tables': {for (var t in allData) t['table'] as String: t['data']}
-    };
+    final Map<String, dynamic> backup = {'exported_at': DateTime.now().toIso8601String(), 'version': 6, 'tables': {for (var t in allData) t['table'] as String: t['data']}};
     final fileName = 'onyx_beacon_full_backup_${DateFormat('yyyy-MM-dd_HH-mm').format(DateTime.now())}.json';
     await exportJson(fileName, backup);
+    await _updateHomeWidget();
   }
-}
-
-
-// ==================== COLOR CODES v6.1 ====================
-class ColorCodes {
-  static const List<String> palette = [
-    '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', 
-    '#DDA0DD', '#98D8C8', '#F7DC6F', '#BB8FCE', '#85C1E2',
-    '#F8B500', '#6C5CE7', '#A29BFE', '#FD79A8', '#FDCB6E',
-    '#E17055', '#00B894', '#00CEC9', '#6C5CE7', '#A8E6CF'
-  ];
-  
-  static Color fromHex(String hex) {
+  static Future<void> exportEncryptedBackup(String password) async {
     try {
-      final buffer = StringBuffer();
-      if (hex.length == 6 || hex.length == 7) buffer.write('ff');
-      buffer.write(hex.replaceFirst('#', ''));
-      return Color(int.parse(buffer.toString(), radix: 16));
-    } catch (_) { return const Color(0xFF4A4E69); }
+      final allData = await DatabaseHelper.instance.getAllDataForExport();
+      final backup = {'exported_at': DateTime.now().toIso8601String(), 'version': 6, 'encrypted': true, 'tables': {for (var t in allData) t['table'] as String: t['data']}};
+      final jsonStr = const JsonEncoder.withIndent('  ').convert(backup);
+      final keyBytes = crypto.sha256.convert(utf8.encode(password)).bytes;
+      final key = enc.Key(Uint8List.fromList(keyBytes));
+      final iv = enc.IV.fromSecureRandom(16);
+      final encrypter = enc.Encrypter(enc.AES(key, mode: enc.AESMode.cbc));
+      final encrypted = encrypter.encrypt(jsonStr, iv: iv);
+      final combined = base64Encode(iv.bytes + encrypted.bytes);
+      final dir = await getApplicationDocumentsDirectory();
+      final fileName = 'onyx_beacon_ENCRYPTED_${DateFormat('yyyy-MM-dd_HH-mm').format(DateTime.now())}.enc';
+      final file = File(path.join(dir.path, fileName));
+      await file.writeAsString(combined);
+      await Share.shareXFiles([XFile(file.path)], text: 'Encrypted Backup: $fileName');
+    } catch (e) { debugPrint('Encrypted error: $e'); }
   }
-  
-  static String toHex(Color color) => '#${color.value.toRadixString(16).padLeft(8, '0').substring(2).toUpperCase()}';
-}
-
-class ColorPickerDialog extends StatelessWidget {
-  final String currentColor;
-  final Function(String) onColorSelected;
-  const ColorPickerDialog({super.key, required this.currentColor, required this.onColorSelected});
-  
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Pick Color Code'),
-      content: SizedBox(
-        width: 300,
-        child: Wrap(
-          spacing: 8, runSpacing: 8,
-          children: ColorCodes.palette.map((hex) {
-            final color = ColorCodes.fromHex(hex);
-            final isSelected = hex.toLowerCase() == currentColor.toLowerCase();
-            return GestureDetector(
-              onTap: () { onColorSelected(hex); Navigator.pop(context); },
-              child: Container(
-                width: 48, height: 48,
-                decoration: BoxDecoration(
-                  color: color,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: isSelected ? Colors.black : Colors.white, width: isSelected ? 3 : 2),
-                  boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 4)],
-                ),
-                child: isSelected ? const Icon(Icons.check, color: Colors.white, size: 20) : null,
-              ),
-            );
-          }).toList(),
-        ),
-      ),
-      actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel'))],
-    );
-  }
-}
-
-// ==================== WIDGETS DASHBOARD v6.1 - Daily Briefing + Quick Stats ====================
-class DailyBriefingWidget extends StatefulWidget {
-  const DailyBriefingWidget({super.key});
-  @override
-  State<DailyBriefingWidget> createState() => _DailyBriefingWidgetState();
-}
-
-class _DailyBriefingWidgetState extends State<DailyBriefingWidget> {
-  int habitsDue = 0;
-  int tasksPending = 0;
-  double netToday = 0;
-  int streakTotal = 0;
-
-  @override
-  void initState() { super.initState(); _loadBriefing(); }
-
-  Future<void> _loadBriefing() async {
+  static Future<void> _updateHomeWidget() async {
     try {
       final db = await DatabaseHelper.instance.database;
       final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
@@ -579,45 +476,78 @@ class _DailyBriefingWidgetState extends State<DailyBriefingWidget> {
       final tasks = await db.query('tasks', where: 'isCompleted = 0');
       final txs = await db.query('transactions', where: 'date = ?', whereArgs: [today]);
       double net = 0;
-      for (var t in txs) {
-        final amt = (t['amount'] as num).toDouble();
-        net += t['type'] == 'Income' ? amt : -amt;
-      }
-      setState(() {
-        habitsDue = habits.length - completions.length;
-        tasksPending = tasks.length;
-        netToday = net;
-      });
-    } catch (_) {}
+      for (var t in txs) { final amt = (t['amount'] as num).toDouble(); net += t['type'] == 'Income' ? amt : -amt; }
+      await HomeWidget.saveWidgetData('habits_due', habits.length - completions.length);
+      await HomeWidget.saveWidgetData('tasks_pending', tasks.length);
+      await HomeWidget.saveWidgetData('net_today', net.toStringAsFixed(2));
+      await HomeWidget.saveWidgetData('last_updated', DateFormat('HH:mm').format(DateTime.now()));
+      await HomeWidget.updateWidget(iOSName: 'OnyxBeaconWidgets', androidName: 'OnyxBeaconWidgetProvider');
+    } catch (e) { debugPrint('Widget update error: $e'); }
   }
+}
 
+// ==================== COLOR CODES + DAILY BRIEFING WIDGET ====================
+class ColorCodes {
+  static const List<String> palette = [
+    '#FF6B6B',
+    '#4ECDC4',
+    '#45B7D1',
+    '#96CEB4',
+    '#FFEAA7',
+    '#DDA0DD',
+    '#98D8C8',
+    '#F7DC6F',
+    '#BB8FCE',
+    '#85C1E2',
+    '#F8B500',
+    '#6C5CE7',
+    '#A29BFE',
+    '#FD79A8',
+    '#FDCB6E',
+  ];
+  static Color fromHex(String hex) {
+    try {
+      final b = StringBuffer();
+      if (hex.length == 6 || hex.length == 7) b.write('ff');
+      b.write(hex.replaceFirst('#',''));
+      return Color(int.parse(b.toString(), radix: 16));
+    } catch (_) { return const Color(0xFF4A4E69); }
+  }
+}
+
+class DailyBriefingWidget extends StatefulWidget {
+  const DailyBriefingWidget({super.key});
   @override
-  Widget build(BuildContext context) {
-    return Card(
-      elevation: 3,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [const Icon(Icons.wb_sunny_outlined, size: 20), const SizedBox(width: 8), const Text('Daily Briefing — Today', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)), const Spacer(), IconButton(icon: const Icon(Icons.refresh, size: 18), onPressed: _loadBriefing)]),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(child: _briefItem('Habits Due', '$habitsDue', Icons.bolt, Colors.orange)),
-                Expanded(child: _briefItem('Tasks', '$tasksPending pending', Icons.task_alt, Colors.blue)),
-                Expanded(child: _briefItem('Net Today', '\$${netToday.toStringAsFixed(2)}', Icons.account_balance_wallet, netToday >=0 ? Colors.green : Colors.red)),
-              ],
-            ),
-            const SizedBox(height: 8),
-            const Text('Widgets: This is your command center widget. Future: home screen widgets via home_widget plugin (Android/iOS) + Windows widgets.', style: TextStyle(fontSize: 11, color: Colors.grey)),
-          ],
-        ),
-      ),
-    );
+  State<DailyBriefingWidget> createState() => _DailyBriefingWidgetState();
+}
+class _DailyBriefingWidgetState extends State<DailyBriefingWidget> {
+  int habitsDue = 0, tasksPending = 0; double netToday = 0;
+  @override
+  void initState(){ super.initState(); _load(); }
+  Future<void> _load() async {
+    try {
+      final db = await DatabaseHelper.instance.database;
+      final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
+      final habits = await db.query('habits');
+      final completions = await db.query('habit_completions', where: 'completed_date = ?', whereArgs: [today]);
+      final tasks = await db.query('tasks', where: 'isCompleted = 0');
+      final txs = await db.query('transactions', where: 'date = ?', whereArgs: [today]);
+      double net = 0; for(var t in txs){ final amt = (t['amount'] as num).toDouble(); net += t['type'] == 'Income' ? amt : -amt; }
+      setState(()=>{habitsDue = habits.length - completions.length, tasksPending = tasks.length, netToday = net});
+    } catch(_){}
   }
-
-  Widget _briefItem(String label, String value, IconData icon, Color color) => Column(children: [Icon(icon, color: color, size: 20), const SizedBox(height: 4), Text(value, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: color)), Text(label, style: const TextStyle(fontSize: 11, color: Colors.grey))]);
+  @override
+  Widget build(BuildContext context){
+    return Card(elevation:2, child: Padding(padding: const EdgeInsets.all(12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[
+      Row(children:[const Icon(Icons.wb_sunny_outlined, size:18), const SizedBox(width:6), const Text('Daily Briefing — Today', style:TextStyle(fontWeight:FontWeight.bold, fontSize:13)), const Spacer(), IconButton(icon: const Icon(Icons.refresh, size:16), onPressed: _load)]),
+      const SizedBox(height:8),
+      Row(children:[
+        Expanded(child: Column(children:[Icon(Icons.bolt, color:Colors.orange, size:18), Text('$habitsDue', style:const TextStyle(fontWeight:FontWeight.bold)), const Text('Habits Due', style:TextStyle(fontSize:10, color:Colors.grey))])),
+        Expanded(child: Column(children:[Icon(Icons.task_alt, color:Colors.blue, size:18), Text('$tasksPending', style:const TextStyle(fontWeight:FontWeight.bold)), const Text('Tasks', style:TextStyle(fontSize:10, color:Colors.grey))])),
+        Expanded(child: Column(children:[Icon(Icons.account_balance_wallet, color:Colors.green, size:18), Text('\$${netToday.toStringAsFixed(0)}', style: TextStyle(fontWeight:FontWeight.bold, color: netToday>=0?Colors.green:Colors.red)), const Text('Net Today', style:TextStyle(fontSize:10, color:Colors.grey))])),
+      ]),
+    ])));
+  }
 }
 
 // ==================== APP SHELL & NAVIGATION ====================
@@ -822,6 +752,14 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
     );
   }
 
+  void _showEncryptedDialog(BuildContext context){
+    final c = TextEditingController();
+    showDialog(context: context, builder: (ctx)=>AlertDialog(
+      title: const Text('Encrypted Backup'),
+      content: Column(mainAxisSize: MainAxisSize.min, children:[const Text('Enter password (min 4 chars) — remember it!'), const SizedBox(height:12), TextField(controller:c, obscureText:true, decoration: const InputDecoration(labelText:'Password', border: OutlineInputBorder()))]),
+      actions:[TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text('Cancel')), ElevatedButton(onPressed: (){ if(c.text.trim().length>=4){ Navigator.pop(ctx); ExportService.exportEncryptedBackup(c.text.trim()); }}, child: const Text('Encrypt & Export'))],
+    ));
+  }
   List<Widget> _buildSearchResults() {
     if (_searchResults == null) return [];
     final List<Widget> widgets = [];
@@ -927,37 +865,17 @@ class _HabitsTabState extends State<HabitsTab> {
     });
   }
 
-  void _showHabitDialog({int? id, String? initialName, String? initialColor}) {
-    String selectedColor = initialColor ?? ColorCodes.palette[0];
+  void _showHabitDialog({int? id, String? initialName}) {
     final controller = TextEditingController(text: initialName ?? '');
     final isEditing = id != null;
     showDialog(
       context: context,
-      builder: (BuildContext context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
+      builder: (BuildContext context) => AlertDialog(
         title: Text(isEditing ? 'Edit Habit' : 'New Habit'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: controller,
-              decoration: const InputDecoration(hintText: 'Enter habit name'),
-              autofocus: true,
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                const Text('Color Code:'),
-                const SizedBox(width: 12),
-                GestureDetector(
-                  onTap: () => showDialog(context: context, builder: (ctx) => ColorPickerDialog(currentColor: selectedColor, onColorSelected: (c) { setDialogState(() => selectedColor = c); })),
-                  child: Container(width: 32, height: 32, decoration: BoxDecoration(color: ColorCodes.fromHex(selectedColor), shape: BoxShape.circle, border: Border.all(color: Colors.black26))),
-                ),
-                const SizedBox(width: 8),
-                Text(selectedColor, style: const TextStyle(fontSize: 12, color: Colors.grey)),
-              ],
-            ),
-          ],
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(hintText: 'Enter habit name'),
+          autofocus: true,
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
@@ -965,11 +883,10 @@ class _HabitsTabState extends State<HabitsTab> {
             onPressed: () async {
               final habitName = controller.text.trim();
               if (habitName.isNotEmpty) {
-                final db = await DatabaseHelper.instance.database;
                 if (isEditing) {
-                  await db.update('habits', {'name': habitName, 'color': selectedColor}, where: 'id = ?', whereArgs: [id]);
+                  await DatabaseHelper.instance.updateHabit(id, habitName);
                 } else {
-                  await db.insert('habits', {'name': habitName, 'color': selectedColor});
+                  await DatabaseHelper.instance.insertHabit(habitName);
                 }
                 await _refreshHabits();
                 if (mounted) Navigator.pop(context);
@@ -979,7 +896,6 @@ class _HabitsTabState extends State<HabitsTab> {
           ),
         ],
       ),
-        ),
     );
   }
 
@@ -1045,7 +961,27 @@ class _HabitsTabState extends State<HabitsTab> {
                             children: [
                               Row(
                                 children: [
-                                  Row(children: [Container(width: 12, height: 12, decoration: BoxDecoration(color: ColorCodes.fromHex(habit['color'] ?? '#FF6B6B'), shape: BoxShape.circle)), const SizedBox(width: 8), Expanded(child: Text(habit['name'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16))),]),
+                                  Row(
+                                    children: [
+                                      Container(
+                                        width: 10,
+                                        height: 10,
+                                        decoration: BoxDecoration(
+                                          color: ColorCodes.fromHex(habit['color'] ?? '#FF6B6B'),
+                                          shape: BoxShape.circle,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Text(
+                                          habit['name'],
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 16,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                   Chip(
                                     label: Text('🔥 $streak streak', style: const TextStyle(fontSize: 12)),
