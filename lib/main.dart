@@ -585,7 +585,7 @@ class _TasksTabState extends State<TasksTab> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Tasks & Todos')),
+      appBar: AppBar(title: const Text('Tasks & To-dos')),
       body: _tasks.isEmpty
           ? const Center(child: Text('No tasks recorded yet. Tap + to add one.'))
           : ListView.builder(
@@ -840,7 +840,7 @@ class _FinanceTabState extends State<FinanceTab> {
 
             return AlertDialog(
               title: Row(
-                mainAxisAlignment: MainAxisAlignment.between,
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(isEditing ? 'Edit Transaction' : 'New Transaction'),
                   IconButton(
