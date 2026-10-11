@@ -16,14 +16,14 @@ class OnyxBeaconApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.blue,
+          seedColor: const Color(0xFF4A4E69),
           brightness: Brightness.light,
         ),
         useMaterial3: true,
       ),
       darkTheme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.blue,
+          seedColor: const Color(0xFF4A4E69),
           brightness: Brightness.dark,
         ),
         useMaterial3: true,
@@ -43,7 +43,7 @@ class DatabaseHelper {
 
   Future<Database> get database async {
     if (_database != null) return _database!;
-    _database = await _initDB('habits.db');
+    _database = await _initDB('onyx_beacon.db');
     return _database!;
   }
 
@@ -53,7 +53,7 @@ class DatabaseHelper {
 
     return await openDatabase(
       dbP,
-      version: 3, // Bumped to version 3 to add transactions table
+      version: 4, // Bumped to version 4 for categories and journal/writing studio tables
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
@@ -76,6 +76,14 @@ class DatabaseHelper {
     ''');
 
     await db.execute('''
+      CREATE TABLE finance_categories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL
+      )
+    ''');
+
+    await db.execute('''
       CREATE TABLE transactions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT NOT NULL,
@@ -85,6 +93,34 @@ class DatabaseHelper {
         date TEXT NOT NULL
       )
     ''');
+
+    await db.execute('''
+      CREATE TABLE journal_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        category TEXT NOT NULL,
+        mood TEXT NOT NULL,
+        date TEXT NOT NULL
+      )
+    ''');
+
+    // Insert default finance categories
+    final defaultCategories = [
+      {'name': 'Housing & Rent', 'type': 'Expense'},
+      {'name': 'Groceries', 'type': 'Expense'},
+      {'name': 'Utilities', 'type': 'Expense'},
+      {'name': 'Transport', 'type': 'Expense'},
+      {'name': 'Dining Out', 'type': 'Expense'},
+      {'name': 'Entertainment', 'type': 'Expense'},
+      {'name': 'Salary', 'type': 'Income'},
+      {'name': 'Freelance', 'type': 'Income'},
+      {'name': 'Investments', 'type': 'Income'},
+    ];
+
+    for (var cat in defaultCategories) {
+      await db.insert('finance_categories', cat);
+    }
   }
 
   Future _onUpgrade(Database db, int oldVersion, int newVersion) async {
@@ -108,6 +144,29 @@ class DatabaseHelper {
           date TEXT NOT NULL
         )
       ''');
+    }
+    if (oldVersion < 4) {
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS finance_categories (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          type TEXT NOT NULL
+        )
+      ''');
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS journal_entries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT NOT NULL,
+          content TEXT NOT NULL,
+          category TEXT NOT NULL,
+          mood TEXT NOT NULL,
+          date TEXT NOT NULL
+        )
+      ''');
+      // Seed default categories if upgrading
+      await db.insert('finance_categories', {'name': 'Housing & Rent', 'type': 'Expense'});
+      await db.insert('finance_categories', {'name': 'Groceries', 'type': 'Expense'});
+      await db.insert('finance_categories', {'name': 'Salary', 'type': 'Income'});
     }
   }
 
@@ -158,6 +217,27 @@ class DatabaseHelper {
     return await db.delete('tasks', where: 'id = ?', whereArgs: [id]);
   }
 
+  // --- Finance Categories CRUD ---
+  Future<List<Map<String, dynamic>>> getFinanceCategories(String type) async {
+    final db = await database;
+    return await db.query('finance_categories', where: 'type = ?', whereArgs: [type]);
+  }
+
+  Future<int> insertFinanceCategory(String name, String type) async {
+    final db = await database;
+    return await db.insert('finance_categories', {'name': name, 'type': type});
+  }
+
+  Future<int> updateFinanceCategory(int id, String name) async {
+    final db = await database;
+    return await db.update('finance_categories', {'name': name}, where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<int> deleteFinanceCategory(int id) async {
+    final db = await database;
+    return await db.delete('finance_categories', where: 'id = ?', whereArgs: [id]);
+  }
+
   // --- Transactions (Finance) CRUD ---
   Future<List<Map<String, dynamic>>> getTransactions() async {
     final db = await database;
@@ -177,6 +257,27 @@ class DatabaseHelper {
   Future<int> deleteTransaction(int id) async {
     final db = await database;
     return await db.delete('transactions', where: 'id = ?', whereArgs: [id]);
+  }
+
+  // --- Journal & Writing Studio CRUD ---
+  Future<List<Map<String, dynamic>>> getJournalEntries() async {
+    final db = await database;
+    return await db.query('journal_entries', orderBy: 'id DESC');
+  }
+
+  Future<int> insertJournalEntry(Map<String, dynamic> row) async {
+    final db = await database;
+    return await db.insert('journal_entries', row);
+  }
+
+  Future<int> updateJournalEntry(int id, Map<String, dynamic> row) async {
+    final db = await database;
+    return await db.update('journal_entries', row, where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<int> deleteJournalEntry(int id) async {
+    final db = await database;
+    return await db.delete('journal_entries', where: 'id = ?', whereArgs: [id]);
   }
 }
 
@@ -234,7 +335,7 @@ class _MainDashboardShellState extends State<MainDashboardShell> {
           NavigationDestination(
             icon: Icon(Icons.book_outlined),
             selectedIcon: Icon(Icons.book),
-            label: 'Journal',
+            label: 'Writing Hub',
           ),
         ],
       ),
@@ -266,10 +367,10 @@ class DashboardHomeTab extends StatelessWidget {
             mainAxisSpacing: 12,
             childAspectRatio: 1.5,
             children: const [
-              MetricCard(title: 'Active Modules', value: 'Habits, Tasks, Finance', icon: Icons.bolt, color: Colors.orange),
-              MetricCard(title: 'System Status', value: 'Optimal', icon: Icons.shield, color: Colors.purple),
-              MetricCard(title: 'Ledger Status', value: 'SQLite Active', icon: Icons.account_balance_wallet, color: Colors.green),
-              MetricCard(title: 'Database', value: 'Version 3', icon: Icons.storage, color: Colors.blue),
+              MetricCard(title: 'Active Modules', value: 'All 5 Operational', icon: Icons.bolt, color: Colors.orange),
+              MetricCard(title: 'Writing Studio', value: 'Books & Stories', icon: Icons.menu_book, color: Colors.purple),
+              MetricCard(title: 'Finance Ledger', value: 'Dynamic Budgets', icon: Icons.account_balance_wallet, color: Colors.green),
+              MetricCard(title: 'Database Engine', value: 'SQLite v4 Live', icon: Icons.storage, color: Colors.blue),
             ],
           ),
         ],
@@ -532,7 +633,7 @@ class _TasksTabState extends State<TasksTab> {
   }
 }
 
-// ==================== 4. FINANCE TAB (Full Ledger) ====================
+// ==================== 4. FINANCE TAB (Full Ledger + Editable Categories) ====================
 class FinanceTab extends StatefulWidget {
   const FinanceTab({super.key});
 
@@ -542,43 +643,30 @@ class FinanceTab extends StatefulWidget {
 
 class _FinanceTabState extends State<FinanceTab> {
   List<Map<String, dynamic>> _transactions = [];
-
-  final List<String> _expenseCategories = [
-    'Housing & Rent',
-    'Groceries',
-    'Utilities',
-    'Transport',
-    'Dining Out',
-    'Entertainment',
-    'Subscriptions',
-    'Shopping',
-    'Healthcare',
-    'Other Expense'
-  ];
-
-  final List<String> _incomeCategories = [
-    'Salary',
-    'Freelance',
-    'Investments',
-    'Gifts',
-    'Other Income'
-  ];
+  List<Map<String, dynamic>> _expenseCategories = [];
+  List<Map<String, dynamic>> _incomeCategories = [];
 
   @override
   void initState() {
     super.initState();
-    _refreshTransactions();
+    _refreshFinanceData();
   }
 
-  Future<void> _refreshTransactions() async {
+  Future<void> _refreshFinanceData() async {
     try {
-      final data = await DatabaseHelper.instance.getTransactions();
+      final txs = await DatabaseHelper.instance.getTransactions();
+      final expCats = await DatabaseHelper.instance.getFinanceCategories('Expense');
+      final incCats = await DatabaseHelper.instance.getFinanceCategories('Income');
       setState(() {
-        _transactions = data;
+        _transactions = txs;
+        _expenseCategories = expCats;
+        _incomeCategories = incCats;
       });
     } catch (e) {
       setState(() {
         _transactions = [];
+        _expenseCategories = [];
+        _incomeCategories = [];
       });
     }
   }
@@ -597,15 +685,143 @@ class _FinanceTabState extends State<FinanceTab> {
 
   double get _netBalance => _totalIncome - _totalExpense;
 
-  void _showTransactionDialog({Map<String, dynamic>? transaction}) {
+  void _manageCategoriesDialog() {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('Manage Categories'),
+              content: SizedBox(
+                width: double.maxFinite,
+                height: 400,
+                child: DefaultTabController(
+                  length: 2,
+                  child: Column(
+                    children: [
+                      const TabBar(
+                        tabs: [Tab(text: 'Expenses'), Tab(text: 'Income')],
+                      ),
+                      Expanded(
+                        child: TabBarView(
+                          children: [
+                            _buildCategoryList('Expense', _expenseCategories, setDialogState),
+                            _buildCategoryList('Income', _incomeCategories, setDialogState),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Close'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildCategoryList(String type, List<Map<String, dynamic>> categories, StateSetter setDialogState) {
+    final controller = TextEditingController();
+
+    return Column(
+      children: [
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: controller,
+                decoration: InputDecoration(hintText: 'New $type category'),
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.add, color: Colors.green),
+              onPressed: () async {
+                if (controller.text.trim().isNotEmpty) {
+                  await DatabaseHelper.instance.insertFinanceCategory(controller.text.trim(), type);
+                  controller.clear();
+                  await _refreshFinanceData();
+                  setDialogState(() {});
+                }
+              },
+            ),
+          ],
+        ),
+        const Divider(),
+        Expanded(
+          child: ListView.builder(
+            itemCount: categories.length,
+            itemBuilder: (context, index) {
+              final cat = categories[index];
+              return ListTile(
+                title: Text(cat['name']),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.edit, size: 18, color: Colors.blue),
+                      onPressed: () async {
+                        final editController = TextEditingController(text: cat['name']);
+                        await showDialog(
+                          context: context,
+                          builder: (ctx) => AlertDialog(
+                            title: const Text('Edit Category'),
+                            content: TextField(controller: editController, autofocus: true),
+                            actions: [
+                              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+                              ElevatedButton(
+                                onPressed: () async {
+                                  if (editController.text.trim().isNotEmpty) {
+                                    await DatabaseHelper.instance.updateFinanceCategory(cat['id'], editController.text.trim());
+                                    await _refreshFinanceData();
+                                    setDialogState(() {});
+                                    Navigator.pop(ctx);
+                                  }
+                                },
+                                child: const Text('Save'),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete, size: 18, color: Colors.red),
+                      onPressed: () async {
+                        await DatabaseHelper.instance.deleteFinanceCategory(cat['id']);
+                        await _refreshFinanceData();
+                        setDialogState(() {});
+                      },
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _showTransactionDialog({Map<String, dynamic>? transaction}) async {
     final isEditing = transaction != null;
     final titleController = TextEditingController(text: isEditing ? transaction['title'] : '');
     final amountController = TextEditingController(text: isEditing ? transaction['amount'].toString() : '');
     
     String selectedType = isEditing ? transaction['type'] : 'Expense';
+    List<Map<String, dynamic>> availableCats = selectedType == 'Income' ? _incomeCategories : _expenseCategories;
+    
     String selectedCategory = isEditing 
         ? transaction['category'] 
-        : _expenseCategories.first;
+        : (availableCats.isNotEmpty ? availableCats.first['name'] : 'General');
     
     String selectedDate = isEditing 
         ? transaction['date'] 
@@ -616,18 +832,31 @@ class _FinanceTabState extends State<FinanceTab> {
       builder: (BuildContext context) {
         return StatefulBuilder(
           builder: (context, setDialogState) {
-            List<String> currentCategories = selectedType == 'Income' ? _incomeCategories : _expenseCategories;
-            if (!currentCategories.contains(selectedCategory)) {
-              selectedCategory = currentCategories.first;
+            List<Map<String, dynamic>> currentCats = selectedType == 'Income' ? _incomeCategories : _expenseCategories;
+            bool categoryExists = currentCats.any((c) => c['name'] == selectedCategory);
+            if (!categoryExists && currentCats.isNotEmpty) {
+              selectedCategory = currentCats.first['name'];
             }
 
             return AlertDialog(
-              title: Text(isEditing ? 'Edit Transaction' : 'New Transaction'),
+              title: Row(
+                mainAxisAlignment: MainAxisAlignment.between,
+                children: [
+                  Text(isEditing ? 'Edit Transaction' : 'New Transaction'),
+                  IconButton(
+                    icon: const Icon(Icons.category, size: 20),
+                    tooltip: 'Manage Categories',
+                    onPressed: () {
+                      Navigator.pop(context);
+                      _manageCategoriesDialog();
+                    },
+                  ),
+                ],
+              ),
               content: SingleChildScrollView(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // Type Selector (Income / Expense)
                     SegmentedButton<String>(
                       segments: const [
                         ButtonSegment(value: 'Expense', label: Text('Expense'), icon: Icon(Icons.arrow_downward, color: Colors.red)),
@@ -637,15 +866,15 @@ class _FinanceTabState extends State<FinanceTab> {
                       onSelectionChanged: (Set<String> newSelection) {
                         setDialogState(() {
                           selectedType = newSelection.first;
-                          currentCategories = selectedType == 'Income' ? _incomeCategories : _expenseCategories;
-                          selectedCategory = currentCategories.first;
+                          List<Map<String, dynamic>> newCats = selectedType == 'Income' ? _incomeCategories : _expenseCategories;
+                          selectedCategory = newCats.isNotEmpty ? newCats.first['name'] : 'General';
                         });
                       },
                     ),
                     const SizedBox(height: 16),
                     TextField(
                       controller: titleController,
-                      decoration: const InputDecoration(labelText: 'Title / Merchant', hintText: 'e.g., Trader Joes, Paycheck'),
+                      decoration: const InputDecoration(labelText: 'Title / Merchant', hintText: 'e.g., Grocery Store, Client Payment'),
                     ),
                     const SizedBox(height: 12),
                     TextField(
@@ -655,10 +884,10 @@ class _FinanceTabState extends State<FinanceTab> {
                     ),
                     const SizedBox(height: 12),
                     DropdownButtonFormField<String>(
-                      value: selectedCategory,
+                      value: currentCats.any((c) => c['name'] == selectedCategory) ? selectedCategory : (currentCats.isNotEmpty ? currentCats.first['name'] : null),
                       decoration: const InputDecoration(labelText: 'Category'),
-                      items: currentCategories.map((cat) {
-                        return DropdownMenuItem(value: cat, child: Text(cat));
+                      items: currentCats.map((cat) {
+                        return DropdownMenuItem<String>(value: cat['name'].toString(), child: Text(cat['name'].toString()));
                       }).toList(),
                       onChanged: (val) {
                         if (val != null) {
@@ -704,7 +933,7 @@ class _FinanceTabState extends State<FinanceTab> {
                         await DatabaseHelper.instance.insertTransaction(row);
                       }
 
-                      await _refreshTransactions();
+                      await _refreshFinanceData();
                       Navigator.pop(context);
                     }
                   },
@@ -721,10 +950,18 @@ class _FinanceTabState extends State<FinanceTab> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Finance Ledger & Budget')),
+      appBar: AppBar(
+        title: const Text('Finance Ledger & Budget'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.category_outlined),
+            tooltip: 'Manage Categories',
+            onPressed: _manageCategoriesDialog,
+          ),
+        ],
+      ),
       body: Column(
         children: [
-          // Financial Summary Card
           Card(
             margin: const EdgeInsets.all(16),
             elevation: 3,
@@ -767,7 +1004,6 @@ class _FinanceTabState extends State<FinanceTab> {
               ),
             ),
           ),
-          // Transaction List
           Expanded(
             child: _transactions.isEmpty
                 ? const Center(child: Text('No transactions recorded. Tap + to add one.'))
@@ -805,7 +1041,7 @@ class _FinanceTabState extends State<FinanceTab> {
                               icon: const Icon(Icons.delete, size: 18, color: Colors.red),
                               onPressed: () async {
                                 await DatabaseHelper.instance.deleteTransaction(tx['id']);
-                                await _refreshTransactions();
+                                await _refreshFinanceData();
                               },
                             ),
                           ],
@@ -824,14 +1060,260 @@ class _FinanceTabState extends State<FinanceTab> {
   }
 }
 
-// ==================== 5. JOURNAL TAB (Placeholder) ====================
-class JournalTab extends StatelessWidget {
+// ==================== 5. JOURNAL & WRITING STUDIO TAB ====================
+class JournalTab extends StatefulWidget {
   const JournalTab({super.key});
+
+  @override
+  State<JournalTab> createState() => _JournalTabState();
+}
+
+class _JournalTabState extends State<JournalTab> {
+  List<Map<String, dynamic>> _entries = [];
+  String _selectedFilter = 'All';
+
+  final List<String> _writingCategories = [
+    'Daily Reflection',
+    'Thought / Idea',
+    'Article',
+    'Short Story',
+    'Book Chapter',
+    'Screenplay'
+  ];
+
+  final List<String> _moods = [
+    '⚡ Creative',
+    '🔥 Focused',
+    '✨ Inspired',
+    '😌 Calm',
+    '🌧️ Reflective',
+    '🔋 Exhausted'
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshEntries();
+  }
+
+  Future<void> _refreshEntries() async {
+    try {
+      final entries = await DatabaseHelper.instance.getJournalEntries();
+      setState(() {
+        _entries = entries;
+      });
+    } catch (e) {
+      setState(() {
+        _entries = [];
+      });
+    }
+  }
+
+  void _openEditor({Map<String, dynamic>? entry}) {
+    final isEditing = entry != null;
+    final titleController = TextEditingController(text: isEditing ? entry['title'] : '');
+    final contentController = TextEditingController(text: isEditing ? entry['content'] : '');
+    
+    String selectedCategory = isEditing ? entry['category'] : _writingCategories.first;
+    String selectedMood = isEditing ? entry['mood'] : _moods.first;
+    String dateStr = isEditing ? entry['date'] : DateTime.now().toIso8601String().substring(0, 10);
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => Scaffold(
+          appBar: AppBar(
+            title: Text(isEditing ? 'Edit Writing / Entry' : 'New Writing Studio Entry'),
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.save),
+                onPressed: () async {
+                  final title = titleController.text.trim();
+                  final content = contentController.text.trim();
+
+                  if (title.isNotEmpty && content.isNotEmpty) {
+                    final row = {
+                      'title': title,
+                      'content': content,
+                      'category': selectedCategory,
+                      'mood': selectedMood,
+                      'date': dateStr,
+                    };
+
+                    if (isEditing) {
+                      await DatabaseHelper.instance.updateJournalEntry(entry['id'], row);
+                    } else {
+                      await DatabaseHelper.instance.insertJournalEntry(row);
+                    }
+
+                    await _refreshEntries();
+                    Navigator.pop(context);
+                  }
+                },
+              ),
+            ],
+          ),
+          body: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      flex: 2,
+                      child: DropdownButtonFormField<String>(
+                        value: selectedCategory,
+                        decoration: const InputDecoration(labelText: 'Format / Type'),
+                        items: _writingCategories.map((cat) {
+                          return DropdownMenuItem(value: cat, child: Text(cat));
+                        }).toList(),
+                        onChanged: (val) {
+                          if (val != null) selectedCategory = val;
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      flex: 2,
+                      child: DropdownButtonFormField<String>(
+                        value: selectedMood,
+                        decoration: const InputDecoration(labelText: 'State / Mood'),
+                        items: _moods.map((m) {
+                          return DropdownMenuItem(value: m, child: Text(m));
+                        }).toList(),
+                        onChanged: (val) {
+                          if (val != null) selectedMood = val;
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: titleController,
+                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  decoration: const InputDecoration(labelText: 'Title / Chapter Name', hintText: 'Enter title...'),
+                ),
+                const SizedBox(height: 12),
+                Expanded(
+                  child: TextField(
+                    controller: contentController,
+                    maxLines: null,
+                    expands: true,
+                    textAlignVertical: TextAlignVertical.top,
+                    decoration: const InputDecoration(
+                      labelText: 'Content / Draft / Thoughts',
+                      alignLabelWithHint: true,
+                      border: OutlineInputBorder(),
+                      hintText: 'Start writing your story, article, or thoughts here...',
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final filteredEntries = _selectedFilter == 'All' 
+        ? _entries 
+        : _entries.where((e) => e['category'] == _selectedFilter).toList();
+
     return Scaffold(
-      appBar: AppBar(title: const Text('Micro-Journal')),
-      body: const Center(child: Text('Journal Module Ready for Database Wiring')),
+      appBar: AppBar(
+        title: const Text('Writing Hub & Micro-Journal'),
+      ),
+      body: Column(
+        children: [
+          // Filter Chips
+          SizedBox(
+            height: 60,
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(right: 8.0),
+                  child: ChoiceChip(
+                    label: const Text('All'),
+                    selected: _selectedFilter == 'All',
+                    onSelected: (selected) => setState(() => _selectedFilter = 'All'),
+                  ),
+                ),
+                ..._writingCategories.map((cat) {
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 8.0),
+                    child: ChoiceChip(
+                      label: Text(cat),
+                      selected: _selectedFilter == cat,
+                      onSelected: (selected) => setState(() => _selectedFilter = cat),
+                    ),
+                  );
+                }),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          // Entries List
+          Expanded(
+            child: filteredEntries.isEmpty
+                ? const Center(child: Text('No writings or journal entries found. Tap + to start drafting.'))
+                : ListView.builder(
+                    itemCount: filteredEntries.length,
+                    itemBuilder: (context, index) {
+                      final entry = filteredEntries[index];
+                      return Card(
+                        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                        child: ListTile(
+                          title: Text(entry['title'], style: const TextStyle(fontWeight: FontWeight.bold)),
+                          subtitle: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const SizedBox(height: 4),
+                              Text(
+                                entry['content'],
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(color: Colors.grey.shade700),
+                              ),
+                              const SizedBox(height: 6),
+                              Row(
+                                children: [
+                                  Chip(
+                                    label: Text(entry['category'], style: const TextStyle(fontSize: 10)),
+                                    visualDensity: VisualDensity.compact,
+                                    padding: EdgeInsets.zero,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text('${entry['mood']} • ${entry['date']}', style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                                ],
+                              ),
+                            ],
+                          ),
+                          isThreeLine: true,
+                          onTap: () => _openEditor(entry: entry),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete, color: Colors.red),
+                            onPressed: () async {
+                              await DatabaseHelper.instance.deleteJournalEntry(entry['id']);
+                              await _refreshEntries();
+                            },
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => _openEditor(),
+        child: const Icon(Icons.add),
+      ),
     );
   }
 }
