@@ -1,20 +1,22 @@
 import 'package:flutter/material.dart';
-import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as path;
+import 'package:sqflite/sqflite.dart';
 
 void main() {
-  runApp(const OnyxBeaconApp());
+  runApp(const MyApp());
 }
 
-class OnyxBeaconApp extends StatelessWidget {
-  const OnyxBeaconApp({super.key});
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Onyx Beacon',
-      theme: ThemeData.dark(useMaterial3: true),
-      home: const HabitListScreen(),
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
+      ),
+      home: const HabitHomePage(),
     );
   }
 }
@@ -27,60 +29,55 @@ class DatabaseHelper {
 
   Future<Database> get database async {
     if (_database != null) return _database!;
-    _database = await _initDB('onyx_beacon.db');
+    _database = await _initDB('habits.db');
     return _database!;
   }
 
   Future<Database> _initDB(String filePath) async {
     final dbPath = await getDatabasesPath();
-    final path = join(dbPath, filePath);
-    return await openDatabase(path, version: 1, onCreate: _createDB);
+    // Fixed: using path.join with the 'path' import prefix
+    final dbP = path.join(dbPath, filePath);
+
+    return await openDatabase(
+      dbP,
+      version: 1,
+      onCreate: _createDB,
+    );
   }
 
   Future _createDB(Database db, int version) async {
     await db.execute('''
       CREATE TABLE habits (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        isCompleted INTEGER NOT NULL
+        name TEXT NOT NULL
       )
     ''');
   }
 
   Future<List<Map<String, dynamic>>> getHabits() async {
-    final db = await instance.database;
+    final db = await database;
     return await db.query('habits');
   }
 
   Future<int> insertHabit(String name) async {
-    final db = await instance.database;
-    return await db.insert('habits', {'name': name, 'isCompleted': 0});
+    final db = await database;
+    return await db.insert('habits', {'name': name});
   }
 
-  Future<void> toggleHabit(int id, int currentStatus) async {
-    final db = await instance.database;
-    await db.update(
-      'habits',
-      {'isCompleted': currentStatus == 1 ? 0 : 1},
-      where: 'id = ?',
-      whereArgs: [id],
-    );
-  }
-
-  Future<void> deleteHabit(int id) async {
-    final db = await instance.database;
-    await db.delete('habits', where: 'id = ?', whereArgs: [id]);
+  Future<int> deleteHabit(int id) async {
+    final db = await database;
+    return await db.delete('habits', where: 'id = ?', whereArgs: [id]);
   }
 }
 
-class HabitListScreen extends StatefulWidget {
-  const HabitListScreen({super.key});
+class HabitHomePage extends StatefulWidget {
+  const HabitHomePage({super.key});
 
   @override
-  State<HabitListScreen> createState() => _HabitListScreenState();
+  State<HabitHomePage> createState() => _HabitHomePageState();
 }
 
-class _HabitListScreenState extends State<HabitListScreen> {
+class _HabitHomePageState extends State<HabitHomePage> {
   List<Map<String, dynamic>> _habits = [];
 
   @override
@@ -89,10 +86,10 @@ class _HabitListScreenState extends State<HabitListScreen> {
     _refreshHabits();
   }
 
-  void _refreshHabits() async {
-    final data = await DatabaseHelper.instance.getHabits();
+  Future<void> _refreshHabits() async {
+    final habits = await DatabaseHelper.instance.getHabits();
     setState(() {
-      _habits = data;
+      _habits = habits;
     });
   }
 
@@ -100,11 +97,12 @@ class _HabitListScreenState extends State<HabitListScreen> {
     final controller = TextEditingController();
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (BuildContext context) => AlertDialog(
         title: const Text('New Habit'),
         content: TextField(
           controller: controller,
           decoration: const InputDecoration(hintText: 'Enter habit name'),
+          autofocus: true,
         ),
         actions: [
           TextButton(
@@ -113,10 +111,11 @@ class _HabitListScreenState extends State<HabitListScreen> {
           ),
           ElevatedButton(
             onPressed: () async {
-              if (controller.text.isNotEmpty) {
-                await DatabaseHelper.instance.insertHabit(controller.text);
-                _refreshHabits();
-                if (mounted) Navigator.pop(context);
+              final habitName = controller.text.trim();
+              if (habitName.isNotEmpty) {
+                await DatabaseHelper.instance.insertHabit(habitName);
+                await _refreshHabits();
+                Navigator.pop(context);
               }
             },
             child: const Text('Add'),
@@ -129,35 +128,25 @@ class _HabitListScreenState extends State<HabitListScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Onyx Beacon')),
-      body: _habits.isEmpty
-          ? const Center(child: Text('No habits yet. Tap + to add one.'))
-          : ListView.builder(
-              itemCount: _habits.length,
-              itemBuilder: (context, index) {
-                final habit = _habits[index];
-                final isDone = habit['isCompleted'] == 1;
-                return ListTile(
-                  title: Text(
-                    habit['name'],
-                    style: TextStyle(
-                      decoration: isDone ? TextDecoration.lineThrough : null,
-                    ),
-                  ),
-                  trailing: Checkbox(
-                    value: isDone,
-                    onChanged: (val) async {
-                      await DatabaseHelper.instance.toggleHabit(habit['id'], habit['isCompleted']);
-                      _refreshHabits();
-                    },
-                  ),
-                  onLongPress: () async {
-                    await DatabaseHelper.instance.deleteHabit(habit['id']);
-                    _refreshHabits();
-                  },
-                );
+      appBar: AppBar(
+        title: const Text('Onyx Beacon Habits'),
+      ),
+      body: ListView.builder(
+        itemCount: _habits.length,
+        itemBuilder: (context, index) {
+          final habit = _habits[index];
+          return ListTile(
+            title: Text(habit['name']),
+            trailing: IconButton(
+              icon: const Icon(Icons.delete, color: Colors.red),
+              onPressed: () async {
+                await DatabaseHelper.instance.deleteHabit(habit['id']);
+                await _refreshHabits();
               },
             ),
+          );
+        },
+      ),
       floatingActionButton: FloatingActionButton(
         onPressed: _addHabitDialog,
         child: const Icon(Icons.add),

@@ -3,10 +3,12 @@ name: Build iOS App
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:
+  pull_request:
+    branches: [ main ]
 
 jobs:
   build:
+    name: Build iOS Release
     runs-on: macos-latest
 
     steps:
@@ -22,58 +24,19 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: '3.47.7'
           channel: 'stable'
           cache: true
 
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Configure Xcode Project for Unsigned Build
+      - name: Build iOS App
         run: |
-          python3 -c '
-          import re
-          path = "ios/Runner.xcodeproj/project.pbxproj"
-          with open(path, "r") as f:
-              content = f.read()
+          flutter build ios --release --no-codesign
 
-          # Set dummy DEVELOPMENT_TEAM to bypass Flutter validation check
-          if "DEVELOPMENT_TEAM" in content:
-              content = re.sub(r"DEVELOPMENT_TEAM = [^;]+;", "DEVELOPMENT_TEAM = 1234567890;", content)
-          else:
-              content = re.sub(r"buildSettings = \{", "buildSettings = {\n\t\t\t\tDEVELOPMENT_TEAM = 1234567890;", content)
-
-          # Force Manual signing and clear signing identities
-          content = re.sub(r"CODE_SIGN_STYLE = Automatic;", "CODE_SIGN_STYLE = Manual;", content)
-          content = re.sub(r"CODE_SIGN_IDENTITY = \"[^\"]*\";", "CODE_SIGN_IDENTITY = \"\";", content)
-
-          with open(path, "w") as f:
-              f.write(content)
-          print("Patched project.pbxproj with dummy team ID.")
-          '
-
-      - name: Build iOS App (No Codesign)
-        run: |
-          flutter build ios --release --no-codesign --config-only
-          xcodebuild -workspace ios/Runner.xcworkspace \
-                     -scheme Runner \
-                     -configuration Release \
-                     -sdk iphoneos \
-                     -derivedDataPath build/ios \
-                     CODE_SIGNING_ALLOWED=NO \
-                     CODE_SIGNING_REQUIRED=NO \
-                     CODE_SIGN_IDENTITY="" \
-                     DEVELOPMENT_TEAM=1234567890 \
-                     build
-
-      - name: Package into IPA for Sideloadly
-        run: |
-          mkdir -p Payload
-          cp -r build/ios/Build/Products/Release-iphoneos/Runner.app Payload/
-          zip -r onyx_beacon.ipa Payload
-          rm -rf Payload
-
-      - name: Upload IPA Artifact
+      - name: Upload iOS Build Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: onyx-beacon-ipa
-          path: onyx_beacon.ipa
+          name: ios-build
+          path: build/ios/iphoneos/Runner.app
