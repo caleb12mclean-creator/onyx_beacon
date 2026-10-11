@@ -49,13 +49,13 @@ class DatabaseHelper {
 
   Future<Database> _initDB(String filePath) async {
     final dbPath = await getDatabasesPath();
-    // Fixed: using path.join with the 'path' import prefix
     final dbP = path.join(dbPath, filePath);
 
     return await openDatabase(
       dbP,
-      version: 1,
+      version: 2, // Bumped to version 2 to safely create the tasks table
       onCreate: _createDB,
+      onUpgrade: _onUpgrade,
     );
   }
 
@@ -66,8 +66,29 @@ class DatabaseHelper {
         name TEXT NOT NULL
       )
     ''');
+
+    await db.execute('''
+      CREATE TABLE tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        isCompleted INTEGER NOT NULL DEFAULT 0
+      )
+    ''');
   }
 
+  Future _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS tasks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT NOT NULL,
+          isCompleted INTEGER NOT NULL DEFAULT 0
+        )
+      ''');
+    }
+  }
+
+  // --- Habits CRUD ---
   Future<List<Map<String, dynamic>>> getHabits() async {
     final db = await database;
     return await db.query('habits');
@@ -81,6 +102,32 @@ class DatabaseHelper {
   Future<int> deleteHabit(int id) async {
     final db = await database;
     return await db.delete('habits', where: 'id = ?', whereArgs: [id]);
+  }
+
+  // --- Tasks CRUD ---
+  Future<List<Map<String, dynamic>>> getTasks() async {
+    final db = await database;
+    return await db.query('tasks');
+  }
+
+  Future<int> insertTask(String title) async {
+    final db = await database;
+    return await db.insert('tasks', {'title': title, 'isCompleted': 0});
+  }
+
+  Future<int> updateTaskCompletion(int id, int isCompleted) async {
+    final db = await database;
+    return await db.update(
+      'tasks',
+      {'isCompleted': isCompleted},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  Future<int> deleteTask(int id) async {
+    final db = await database;
+    return await db.delete('tasks', where: 'id = ?', whereArgs: [id]);
   }
 }
 
@@ -170,10 +217,10 @@ class DashboardHomeTab extends StatelessWidget {
             mainAxisSpacing: 12,
             childAspectRatio: 1.5,
             children: const [
-              MetricCard(title: 'Active Module', value: 'Habits Live', icon: Icons.bolt, color: Colors.orange),
-              MetricCard(title: 'Pending Tasks', value: '0 Ready', icon: Icons.task_alt, color: Colors.blue),
-              MetricCard(title: 'Monthly Spent', value: '\$0.00', icon: Icons.wallet, color: Colors.green),
+              MetricCard(title: 'Active Modules', value: 'Habits & Tasks', icon: Icons.bolt, color: Colors.orange),
               MetricCard(title: 'System Status', value: 'Optimal', icon: Icons.shield, color: Colors.purple),
+              MetricCard(title: 'Monthly Spent', value: '\$0.00', icon: Icons.wallet, color: Colors.green),
+              MetricCard(title: 'Database', value: 'SQLite Active', icon: Icons.storage, color: Colors.blue),
             ],
           ),
         ],
@@ -222,7 +269,7 @@ class MetricCard extends StatelessWidget {
   }
 }
 
-// ==================== 2. HABITS TAB (Your Working SQLite Code) ====================
+// ==================== 2. HABITS TAB ====================
 class HabitsTab extends StatefulWidget {
   const HabitsTab({super.key});
 
@@ -281,9 +328,7 @@ class _HabitsTabState extends State<HabitsTab> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Onyx Beacon Habits'),
-      ),
+      appBar: AppBar(title: const Text('Onyx Beacon Habits')),
       body: _habits.isEmpty
           ? const Center(child: Text('No habits recorded yet. Tap + to add one.'))
           : ListView.builder(
@@ -310,7 +355,7 @@ class _HabitsTabState extends State<HabitsTab> {
   }
 }
 
-// ==================== 3. TASKS TAB (Placeholder) ====================
+// ==================== 3. TASKS TAB ====================
 class TasksTab extends StatefulWidget {
   const TasksTab({super.key});
 
@@ -334,8 +379,9 @@ class _TasksTabState extends State<TasksTab> {
         _tasks = tasks;
       });
     } catch (e) {
-      // Handles table creation if DB was already initialized without it
-      _tasks = [];
+      setState(() {
+        _tasks = [];
+      });
     }
   }
 
