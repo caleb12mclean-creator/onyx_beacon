@@ -311,13 +311,107 @@ class _HabitsTabState extends State<HabitsTab> {
 }
 
 // ==================== 3. TASKS TAB (Placeholder) ====================
-class TasksTab extends StatelessWidget {
+class TasksTab extends StatefulWidget {
   const TasksTab({super.key});
+
+  @override
+  State<TasksTab> createState() => _TasksTabState();
+}
+
+class _TasksTabState extends State<TasksTab> {
+  List<Map<String, dynamic>> _tasks = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshTasks();
+  }
+
+  Future<void> _refreshTasks() async {
+    try {
+      final tasks = await DatabaseHelper.instance.getTasks();
+      setState(() {
+        _tasks = tasks;
+      });
+    } catch (e) {
+      // Handles table creation if DB was already initialized without it
+      _tasks = [];
+    }
+  }
+
+  void _addTaskDialog() {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (BuildContext context) => AlertDialog(
+        title: const Text('New Task'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(hintText: 'Enter task description'),
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              final taskTitle = controller.text.trim();
+              if (taskTitle.isNotEmpty) {
+                await DatabaseHelper.instance.insertTask(taskTitle);
+                await _refreshTasks();
+                Navigator.pop(context);
+              }
+            },
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Tasks & Todos')),
-      body: const Center(child: Text('Tasks Module Ready for Database Wiring')),
+      body: _tasks.isEmpty
+          ? const Center(child: Text('No tasks recorded yet. Tap + to add one.'))
+          : ListView.builder(
+              itemCount: _tasks.length,
+              itemBuilder: (context, index) {
+                final task = _tasks[index];
+                final isDone = task['isCompleted'] == 1;
+                return CheckboxListTile(
+                  title: Text(
+                    task['title'],
+                    style: TextStyle(
+                      decoration: isDone ? TextDecoration.lineThrough : null,
+                      color: isDone ? Colors.grey : null,
+                    ),
+                  ),
+                  value: isDone,
+                  onChanged: (bool? value) async {
+                    await DatabaseHelper.instance.updateTaskCompletion(
+                      task['id'],
+                      value == true ? 1 : 0,
+                    );
+                    await _refreshTasks();
+                  },
+                  secondary: IconButton(
+                    icon: const Icon(Icons.delete, color: Colors.red),
+                    onPressed: () async {
+                      await DatabaseHelper.instance.deleteTask(task['id']);
+                      await _refreshTasks();
+                    },
+                  ),
+                );
+              },
+            ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _addTaskDialog,
+        child: const Icon(Icons.add),
+      ),
     );
   }
 }
