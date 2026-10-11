@@ -1,120 +1,165 @@
 import 'package:flutter/material.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:path/path.dart';
 
 void main() {
-  runApp(const MyApp());
+  runApp(const OnyxBeaconApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class OnyxBeaconApp extends StatelessWidget {
+  const OnyxBeaconApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
-      ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      title: 'Onyx Beacon',
+      theme: ThemeData.dark(useMaterial3: true),
+      home: const HabitListScreen(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
+class DatabaseHelper {
+  static final DatabaseHelper instance = DatabaseHelper._init();
+  static Database? _database;
 
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
+  DatabaseHelper._init();
 
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
+  Future<Database> get database async {
+    if (_database != null) return _database!;
+    _database = await _initDB('onyx_beacon.db');
+    return _database!;
+  }
 
-  final String title;
+  Future<Database> _initDB(String filePath) async {
+    final dbPath = await getDatabasesPath();
+    final path = join(dbPath, filePath);
+    return await openDatabase(path, version: 1, onCreate: _createDB);
+  }
 
-  @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  Future _createDB(Database db, int version) async {
+    await db.execute('''
+      CREATE TABLE habits (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        isCompleted INTEGER NOT NULL
+      )
+    ''');
+  }
+
+  Future<List<Map<String, dynamic>>> getHabits() async {
+    final db = await instance.database;
+    return await db.query('habits');
+  }
+
+  Future<int> insertHabit(String name) async {
+    final db = await instance.database;
+    return await db.insert('habits', {'name': name, 'isCompleted': 0});
+  }
+
+  Future<void> toggleHabit(int id, int currentStatus) async {
+    final db = await instance.database;
+    await db.update(
+      'habits',
+      {'isCompleted': currentStatus == 1 ? 0 : 1},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  Future<void> deleteHabit(int id) async {
+    final db = await instance.database;
+    await db.delete('habits', where: 'id = ?', whereArgs: [id]);
+  }
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class HabitListScreen extends StatefulWidget {
+  const HabitListScreen({super.key});
 
-  void _incrementCounter() {
+  @override
+  State<HabitListScreen> createState() => _HabitListScreenState();
+}
+
+class _HabitListScreenState extends State<HabitListScreen> {
+  List<Map<String, dynamic>> _habits = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshHabits();
+  }
+
+  void _refreshHabits() async {
+    final data = await DatabaseHelper.instance.getHabits();
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _habits = data;
     });
+  }
+
+  void _addHabitDialog() {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('New Habit'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(hintText: 'Enter habit name'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              if (controller.text.isNotEmpty) {
+                await DatabaseHelper.instance.insertHabit(controller.text);
+                _refreshHabits();
+                if (mounted) Navigator.pop(context);
+              }
+            },
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
-          children: [
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+      appBar: AppBar(title: const Text('Onyx Beacon')),
+      body: _habits.isEmpty
+          ? const Center(child: Text('No habits yet. Tap + to add one.'))
+          : ListView.builder(
+              itemCount: _habits.length,
+              itemBuilder: (context, index) {
+                final habit = _habits[index];
+                final isDone = habit['isCompleted'] == 1;
+                return ListTile(
+                  title: Text(
+                    habit['name'],
+                    style: TextStyle(
+                      decoration: isDone ? TextDecoration.lineThrough : null,
+                    ),
+                  ),
+                  trailing: Checkbox(
+                    value: isDone,
+                    onChanged: (val) async {
+                      await DatabaseHelper.instance.toggleHabit(habit['id'], habit['isCompleted']);
+                      _refreshHabits();
+                    },
+                  ),
+                  onLongPress: () async {
+                    await DatabaseHelper.instance.deleteHabit(habit['id']);
+                    _refreshHabits();
+                  },
+                );
+              },
             ),
-          ],
-        ),
-      ),
       floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
+        onPressed: _addHabitDialog,
         child: const Icon(Icons.add),
       ),
     );
