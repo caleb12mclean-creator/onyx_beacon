@@ -53,7 +53,7 @@ class DatabaseHelper {
 
     return await openDatabase(
       dbP,
-      version: 2,
+      version: 3, // Bumped to version 3 to add transactions table
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
@@ -74,6 +74,17 @@ class DatabaseHelper {
         isCompleted INTEGER NOT NULL DEFAULT 0
       )
     ''');
+
+    await db.execute('''
+      CREATE TABLE transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        amount REAL NOT NULL,
+        type TEXT NOT NULL,
+        category TEXT NOT NULL,
+        date TEXT NOT NULL
+      )
+    ''');
   }
 
   Future _onUpgrade(Database db, int oldVersion, int newVersion) async {
@@ -83,6 +94,18 @@ class DatabaseHelper {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           title TEXT NOT NULL,
           isCompleted INTEGER NOT NULL DEFAULT 0
+        )
+      ''');
+    }
+    if (oldVersion < 3) {
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS transactions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT NOT NULL,
+          amount REAL NOT NULL,
+          type TEXT NOT NULL,
+          category TEXT NOT NULL,
+          date TEXT NOT NULL
         )
       ''');
     }
@@ -101,12 +124,7 @@ class DatabaseHelper {
 
   Future<int> updateHabit(int id, String name) async {
     final db = await database;
-    return await db.update(
-      'habits',
-      {'name': name},
-      where: 'id = ?',
-      whereArgs: [id],
-    );
+    return await db.update('habits', {'name': name}, where: 'id = ?', whereArgs: [id]);
   }
 
   Future<int> deleteHabit(int id) async {
@@ -127,27 +145,38 @@ class DatabaseHelper {
 
   Future<int> updateTaskTitle(int id, String title) async {
     final db = await database;
-    return await db.update(
-      'tasks',
-      {'title': title},
-      where: 'id = ?',
-      whereArgs: [id],
-    );
+    return await db.update('tasks', {'title': title}, where: 'id = ?', whereArgs: [id]);
   }
 
   Future<int> updateTaskCompletion(int id, int isCompleted) async {
     final db = await database;
-    return await db.update(
-      'tasks',
-      {'isCompleted': isCompleted},
-      where: 'id = ?',
-      whereArgs: [id],
-    );
+    return await db.update('tasks', {'isCompleted': isCompleted}, where: 'id = ?', whereArgs: [id]);
   }
 
   Future<int> deleteTask(int id) async {
     final db = await database;
     return await db.delete('tasks', where: 'id = ?', whereArgs: [id]);
+  }
+
+  // --- Transactions (Finance) CRUD ---
+  Future<List<Map<String, dynamic>>> getTransactions() async {
+    final db = await database;
+    return await db.query('transactions', orderBy: 'id DESC');
+  }
+
+  Future<int> insertTransaction(Map<String, dynamic> row) async {
+    final db = await database;
+    return await db.insert('transactions', row);
+  }
+
+  Future<int> updateTransaction(int id, Map<String, dynamic> row) async {
+    final db = await database;
+    return await db.update('transactions', row, where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<int> deleteTransaction(int id) async {
+    final db = await database;
+    return await db.delete('transactions', where: 'id = ?', whereArgs: [id]);
   }
 }
 
@@ -237,10 +266,10 @@ class DashboardHomeTab extends StatelessWidget {
             mainAxisSpacing: 12,
             childAspectRatio: 1.5,
             children: const [
-              MetricCard(title: 'Active Modules', value: 'Habits & Tasks', icon: Icons.bolt, color: Colors.orange),
+              MetricCard(title: 'Active Modules', value: 'Habits, Tasks, Finance', icon: Icons.bolt, color: Colors.orange),
               MetricCard(title: 'System Status', value: 'Optimal', icon: Icons.shield, color: Colors.purple),
-              MetricCard(title: 'Monthly Spent', value: '\$0.00', icon: Icons.wallet, color: Colors.green),
-              MetricCard(title: 'Database', value: 'SQLite Active', icon: Icons.storage, color: Colors.blue),
+              MetricCard(title: 'Ledger Status', value: 'SQLite Active', icon: Icons.account_balance_wallet, color: Colors.green),
+              MetricCard(title: 'Database', value: 'Version 3', icon: Icons.storage, color: Colors.blue),
             ],
           ),
         ],
@@ -281,7 +310,7 @@ class MetricCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 8),
-            Text(value, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            Text(value, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
           ],
         ),
       ),
@@ -289,7 +318,7 @@ class MetricCard extends StatelessWidget {
   }
 }
 
-// ==================== 2. HABITS TAB (Editable & Deletable) ====================
+// ==================== 2. HABITS TAB ====================
 class HabitsTab extends StatefulWidget {
   const HabitsTab({super.key});
 
@@ -327,10 +356,7 @@ class _HabitsTabState extends State<HabitsTab> {
           autofocus: true,
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
           ElevatedButton(
             onPressed: () async {
               final habitName = controller.text.trim();
@@ -368,10 +394,7 @@ class _HabitsTabState extends State<HabitsTab> {
                     children: [
                       IconButton(
                         icon: const Icon(Icons.edit, color: Colors.blue),
-                        onPressed: () => _showHabitDialog(
-                          id: habit['id'],
-                          initialName: habit['name'],
-                        ),
+                        onPressed: () => _showHabitDialog(id: habit['id'], initialName: habit['name']),
                       ),
                       IconButton(
                         icon: const Icon(Icons.delete, color: Colors.red),
@@ -393,7 +416,7 @@ class _HabitsTabState extends State<HabitsTab> {
   }
 }
 
-// ==================== 3. TASKS TAB (Editable & Deletable) ====================
+// ==================== 3. TASKS TAB ====================
 class TasksTab extends StatefulWidget {
   const TasksTab({super.key});
 
@@ -437,10 +460,7 @@ class _TasksTabState extends State<TasksTab> {
           autofocus: true,
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
           ElevatedButton(
             onPressed: () async {
               final taskTitle = controller.text.trim();
@@ -482,10 +502,7 @@ class _TasksTabState extends State<TasksTab> {
                   ),
                   value: isDone,
                   onChanged: (bool? value) async {
-                    await DatabaseHelper.instance.updateTaskCompletion(
-                      task['id'],
-                      value == true ? 1 : 0,
-                    );
+                    await DatabaseHelper.instance.updateTaskCompletion(task['id'], value == true ? 1 : 0);
                     await _refreshTasks();
                   },
                   secondary: Row(
@@ -493,10 +510,7 @@ class _TasksTabState extends State<TasksTab> {
                     children: [
                       IconButton(
                         icon: const Icon(Icons.edit, color: Colors.blue, size: 20),
-                        onPressed: () => _showTaskDialog(
-                          id: task['id'],
-                          initialTitle: task['title'],
-                        ),
+                        onPressed: () => _showTaskDialog(id: task['id'], initialTitle: task['title']),
                       ),
                       IconButton(
                         icon: const Icon(Icons.delete, color: Colors.red, size: 20),
@@ -518,14 +532,294 @@ class _TasksTabState extends State<TasksTab> {
   }
 }
 
-// ==================== 4. FINANCE TAB (Placeholder) ====================
-class FinanceTab extends StatelessWidget {
+// ==================== 4. FINANCE TAB (Full Ledger) ====================
+class FinanceTab extends StatefulWidget {
   const FinanceTab({super.key});
+
+  @override
+  State<FinanceTab> createState() => _FinanceTabState();
+}
+
+class _FinanceTabState extends State<FinanceTab> {
+  List<Map<String, dynamic>> _transactions = [];
+
+  final List<String> _expenseCategories = [
+    'Housing & Rent',
+    'Groceries',
+    'Utilities',
+    'Transport',
+    'Dining Out',
+    'Entertainment',
+    'Subscriptions',
+    'Shopping',
+    'Healthcare',
+    'Other Expense'
+  ];
+
+  final List<String> _incomeCategories = [
+    'Salary',
+    'Freelance',
+    'Investments',
+    'Gifts',
+    'Other Income'
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshTransactions();
+  }
+
+  Future<void> _refreshTransactions() async {
+    try {
+      final data = await DatabaseHelper.instance.getTransactions();
+      setState(() {
+        _transactions = data;
+      });
+    } catch (e) {
+      setState(() {
+        _transactions = [];
+      });
+    }
+  }
+
+  double get _totalIncome {
+    return _transactions
+        .where((t) => t['type'] == 'Income')
+        .fold(0.0, (sum, t) => sum + (t['amount'] as num).toDouble());
+  }
+
+  double get _totalExpense {
+    return _transactions
+        .where((t) => t['type'] == 'Expense')
+        .fold(0.0, (sum, t) => sum + (t['amount'] as num).toDouble());
+  }
+
+  double get _netBalance => _totalIncome - _totalExpense;
+
+  void _showTransactionDialog({Map<String, dynamic>? transaction}) {
+    final isEditing = transaction != null;
+    final titleController = TextEditingController(text: isEditing ? transaction['title'] : '');
+    final amountController = TextEditingController(text: isEditing ? transaction['amount'].toString() : '');
+    
+    String selectedType = isEditing ? transaction['type'] : 'Expense';
+    String selectedCategory = isEditing 
+        ? transaction['category'] 
+        : _expenseCategories.first;
+    
+    String selectedDate = isEditing 
+        ? transaction['date'] 
+        : DateTime.now().toIso8601String().substring(0, 10);
+
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            List<String> currentCategories = selectedType == 'Income' ? _incomeCategories : _expenseCategories;
+            if (!currentCategories.contains(selectedCategory)) {
+              selectedCategory = currentCategories.first;
+            }
+
+            return AlertDialog(
+              title: Text(isEditing ? 'Edit Transaction' : 'New Transaction'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Type Selector (Income / Expense)
+                    SegmentedButton<String>(
+                      segments: const [
+                        ButtonSegment(value: 'Expense', label: Text('Expense'), icon: Icon(Icons.arrow_downward, color: Colors.red)),
+                        ButtonSegment(value: 'Income', label: Text('Income'), icon: Icon(Icons.arrow_upward, color: Colors.green)),
+                      ],
+                      selected: {selectedType},
+                      onSelectionChanged: (Set<String> newSelection) {
+                        setDialogState(() {
+                          selectedType = newSelection.first;
+                          currentCategories = selectedType == 'Income' ? _incomeCategories : _expenseCategories;
+                          selectedCategory = currentCategories.first;
+                        });
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: titleController,
+                      decoration: const InputDecoration(labelText: 'Title / Merchant', hintText: 'e.g., Trader Joes, Paycheck'),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: amountController,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      decoration: const InputDecoration(labelText: 'Amount (\$)', hintText: '0.00'),
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      value: selectedCategory,
+                      decoration: const InputDecoration(labelText: 'Category'),
+                      items: currentCategories.map((cat) {
+                        return DropdownMenuItem(value: cat, child: Text(cat));
+                      }).toList(),
+                      onChanged: (val) {
+                        if (val != null) {
+                          setDialogState(() {
+                            selectedCategory = val;
+                          });
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: TextEditingController(text: selectedDate),
+                      decoration: const InputDecoration(labelText: 'Date (YYYY-MM-DD)'),
+                      onChanged: (val) {
+                        selectedDate = val;
+                      },
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    final title = titleController.text.trim();
+                    final amount = double.tryParse(amountController.text.trim()) ?? 0.0;
+
+                    if (title.isNotEmpty && amount > 0) {
+                      final row = {
+                        'title': title,
+                        'amount': amount,
+                        'type': selectedType,
+                        'category': selectedCategory,
+                        'date': selectedDate,
+                      };
+
+                      if (isEditing) {
+                        await DatabaseHelper.instance.updateTransaction(transaction['id'], row);
+                      } else {
+                        await DatabaseHelper.instance.insertTransaction(row);
+                      }
+
+                      await _refreshTransactions();
+                      Navigator.pop(context);
+                    }
+                  },
+                  child: Text(isEditing ? 'Save' : 'Add'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Finances & Budget')),
-      body: const Center(child: Text('Finance Module Ready for Database Wiring')),
+      appBar: AppBar(title: const Text('Finance Ledger & Budget')),
+      body: Column(
+        children: [
+          // Financial Summary Card
+          Card(
+            margin: const EdgeInsets.all(16),
+            elevation: 3,
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                children: [
+                  const Text('Net Balance', style: TextStyle(fontSize: 14, color: Colors.grey)),
+                  const SizedBox(height: 4),
+                  Text(
+                    '\$${_netBalance.toStringAsFixed(2)}',
+                    style: TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      color: _netBalance >= 0 ? Colors.green : Colors.red,
+                    ),
+                  ),
+                  const Divider(height: 24),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: [
+                      Column(
+                        children: [
+                          const Text('Income', style: TextStyle(color: Colors.grey, fontSize: 13)),
+                          const SizedBox(height: 4),
+                          Text('+\$${_totalIncome.toStringAsFixed(2)}', style: const TextStyle(color: Colors.green, fontWeight: FontWeight.bold, fontSize: 16)),
+                        ],
+                      ),
+                      Container(height: 30, width: 1, color: Colors.grey.shade300),
+                      Column(
+                        children: [
+                          const Text('Expenses', style: TextStyle(color: Colors.grey, fontSize: 13)),
+                          const SizedBox(height: 4),
+                          Text('-\$${_totalExpense.toStringAsFixed(2)}', style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 16)),
+                        ],
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          // Transaction List
+          Expanded(
+            child: _transactions.isEmpty
+                ? const Center(child: Text('No transactions recorded. Tap + to add one.'))
+                : ListView.builder(
+                    itemCount: _transactions.length,
+                    itemBuilder: (context, index) {
+                      final tx = _transactions[index];
+                      final isIncome = tx['type'] == 'Income';
+                      return ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: isIncome ? Colors.green.shade100 : Colors.red.shade100,
+                          child: Icon(
+                            isIncome ? Icons.arrow_upward : Icons.arrow_downward,
+                            color: isIncome ? Colors.green : Colors.red,
+                          ),
+                        ),
+                        title: Text(tx['title'], style: const TextStyle(fontWeight: FontWeight.bold)),
+                        subtitle: Text('${tx['category']} • ${tx['date']}'),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              '${isIncome ? '+' : '-'}\$${(tx['amount'] as num).toStringAsFixed(2)}',
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 15,
+                                color: isIncome ? Colors.green : Colors.red,
+                              ),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.edit, size: 18, color: Colors.blue),
+                              onPressed: () => _showTransactionDialog(transaction: tx),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.delete, size: 18, color: Colors.red),
+                              onPressed: () async {
+                                await DatabaseHelper.instance.deleteTransaction(tx['id']);
+                                await _refreshTransactions();
+                              },
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => _showTransactionDialog(),
+        child: const Icon(Icons.add),
+      ),
     );
   }
 }
