@@ -516,12 +516,15 @@ class ColorCodes {
 }
 
 class DailyBriefingWidget extends StatefulWidget {
-  const DailyBriefingWidget({super.key});
+  final Function(int)? onNavigateToTab;
+  const DailyBriefingWidget({super.key, this.onNavigateToTab});
   @override
   State<DailyBriefingWidget> createState() => _DailyBriefingWidgetState();
 }
 class _DailyBriefingWidgetState extends State<DailyBriefingWidget> {
   int habitsDue = 0, tasksPending = 0; double netToday = 0;
+  List<Map<String, dynamic>> dueHabits = [];
+  List<Map<String, dynamic>> pendingTasks = [];
   @override
   void initState(){ super.initState(); _load(); }
   Future<void> _load() async {
@@ -530,23 +533,225 @@ class _DailyBriefingWidgetState extends State<DailyBriefingWidget> {
       final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
       final habits = await db.query('habits');
       final completions = await db.query('habit_completions', where: 'completed_date = ?', whereArgs: [today]);
+      final completedIds = completions.map((e) => e['habit_id']).toSet();
+      final due = habits.where((h) => !completedIds.contains(h['id'])).toList();
       final tasks = await db.query('tasks', where: 'isCompleted = 0');
       final txs = await db.query('transactions', where: 'date = ?', whereArgs: [today]);
-      double net = 0; for(var t in txs){ final amt = (t['amount'] as num).toDouble(); net += t['type'] == 'Income' ? amt : -amt; }
-      setState(()=>{habitsDue = habits.length - completions.length, tasksPending = tasks.length, netToday = net});
+      double net = 0;
+      for(var t in txs){ final amt = (t['amount'] as num).toDouble(); net += t['type'] == 'Income' ? amt : -amt; }
+      setState((){
+        habitsDue = due.length;
+        tasksPending = tasks.length;
+        netToday = net;
+        dueHabits = due;
+        pendingTasks = tasks;
+      });
     } catch(_){}
+  }
+  void _showDueHabitsDialog() {
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      title: Text('Habits Due Today ($habitsDue)'),
+      content: SizedBox(
+        width: 320,
+        height: 320,
+        child: dueHabits.isEmpty
+          ? const Center(child: Text('All habits done! 🎉'))
+          : ListView.builder(
+              itemCount: dueHabits.length,
+              itemBuilder: (c,i){
+                final habit = dueHabits[i];
+                return ListTile(
+                  leading: Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: ColorCodes.fromHex(habit['color'] ?? '#FF6B6B'),
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  title: Text(habit['name']),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.check_circle_outline),
+                    onPressed: () async {
+                      final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
+                      await DatabaseHelper.instance.toggleHabitCompletion(habit['id'] as int, today);
+                      Navigator.pop(ctx);
+                      _load();
+                      if(mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('${habit['name']} done! 🔥')),
+                        );
+                      }
+                    },
+                  ),
+                );
+              },
+            ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: ()=>Navigator.pop(ctx),
+          child: const Text('Close'),
+        ),
+      ],
+    ));
+  }
+  void _showPendingTasksDialog() {
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      title: Text('Tasks Pending ($tasksPending)'),
+      content: SizedBox(
+        width: 320,
+        height: 320,
+        child: pendingTasks.isEmpty
+          ? const Center(child: Text('No pending tasks!'))
+          : ListView.builder(
+              itemCount: pendingTasks.length,
+              itemBuilder: (c,i){
+                final task = pendingTasks[i];
+                return ListTile(
+                  leading: const Icon(Icons.task_alt_outlined),
+                  title: Text(task['title']),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.check_box_outline_blank),
+                    onPressed: () async {
+                      await DatabaseHelper.instance.updateTaskCompletion(task['id'] as int, 1);
+                      Navigator.pop(ctx);
+                      _load();
+                      if(mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('${task['title']} completed!')),
+                        );
+                      }
+                    },
+                  ),
+                );
+              },
+            ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: ()=>Navigator.pop(ctx),
+          child: const Text('Close'),
+        ),
+        if(pendingTasks.isNotEmpty)
+          TextButton(
+            onPressed: (){
+              Navigator.pop(ctx);
+              widget.onNavigateToTab?.call(2);
+            },
+            child: const Text('Go to Tasks'),
+          ),
+      ],
+    ));
   }
   @override
   Widget build(BuildContext context){
-    return Card(elevation:2, child: Padding(padding: const EdgeInsets.all(12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[
-      Row(children:[const Icon(Icons.wb_sunny_outlined, size:18), const SizedBox(width:6), const Text('Daily Briefing — Today', style:TextStyle(fontWeight:FontWeight.bold, fontSize:13)), const Spacer(), IconButton(icon: const Icon(Icons.refresh, size:16), onPressed: _load)]),
-      const SizedBox(height:8),
-      Row(children:[
-        Expanded(child: Column(children:[Icon(Icons.bolt, color:Colors.orange, size:18), Text('$habitsDue', style:const TextStyle(fontWeight:FontWeight.bold)), const Text('Habits Due', style:TextStyle(fontSize:10, color:Colors.grey))])),
-        Expanded(child: Column(children:[Icon(Icons.task_alt, color:Colors.blue, size:18), Text('$tasksPending', style:const TextStyle(fontWeight:FontWeight.bold)), const Text('Tasks', style:TextStyle(fontSize:10, color:Colors.grey))])),
-        Expanded(child: Column(children:[Icon(Icons.account_balance_wallet, color:Colors.green, size:18), Text('\$${netToday.toStringAsFixed(0)}', style: TextStyle(fontWeight:FontWeight.bold, color: netToday>=0?Colors.green:Colors.red)), const Text('Net Today', style:TextStyle(fontSize:10, color:Colors.grey))])),
-      ]),
-    ])));
+    return Card(
+      elevation: 2,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children:[
+            Row(
+              children:[
+                const Icon(Icons.wb_sunny_outlined, size: 18),
+                const SizedBox(width: 6),
+                const Text(
+                  'Daily Briefing — Today (Tap to act)',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                ),
+                const Spacer(),
+                IconButton(
+                  icon: const Icon(Icons.refresh, size: 16),
+                  onPressed: _load,
+                  tooltip: 'Refresh',
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children:[
+                Expanded(
+                  child: InkWell(
+                    onTap: habitsDue > 0 ? _showDueHabitsDialog : null,
+                    borderRadius: BorderRadius.circular(8),
+                    child: Column(
+                      children:[
+                        Icon(Icons.bolt, color: Colors.orange, size: 18),
+                        Text(
+                          '$habitsDue',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        const Text(
+                          'Habits Due',
+                          style: TextStyle(fontSize: 10, color: Colors.grey),
+                        ),
+                        if(habitsDue > 0)
+                          const Text(
+                            'Tap to complete',
+                            style: TextStyle(fontSize: 8, color: Colors.orange),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: InkWell(
+                    onTap: tasksPending > 0 ? _showPendingTasksDialog : null,
+                    borderRadius: BorderRadius.circular(8),
+                    child: Column(
+                      children:[
+                        Icon(Icons.task_alt, color: Colors.blue, size: 18),
+                        Text(
+                          '$tasksPending',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        const Text(
+                          'Tasks',
+                          style: TextStyle(fontSize: 10, color: Colors.grey),
+                        ),
+                        if(tasksPending > 0)
+                          const Text(
+                            'Tap to view',
+                            style: TextStyle(fontSize: 8, color: Colors.blue),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: InkWell(
+                    onTap: () => widget.onNavigateToTab?.call(3),
+                    borderRadius: BorderRadius.circular(8),
+                    child: Column(
+                      children:[
+                        Icon(Icons.account_balance_wallet, color: Colors.green, size: 18),
+                        Text(
+                          '\$${netToday.toStringAsFixed(0)}',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: netToday>=0?Colors.green:Colors.red,
+                          ),
+                        ),
+                        const Text(
+                          'Net Today',
+                          style: TextStyle(fontSize: 10, color: Colors.grey),
+                        ),
+                        const Text(
+                          'Tap for Finance',
+                          style: TextStyle(fontSize: 8, color: Colors.green),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -561,6 +766,7 @@ class MainDashboardShell extends StatefulWidget {
 
 class _MainDashboardShellState extends State<MainDashboardShell> {
   int _currentIndex = 0;
+  void setTab(int idx){ setState(()=>_currentIndex = idx); }
 
   final List<Widget> _pages = const [
     DashboardHomeTab(),
