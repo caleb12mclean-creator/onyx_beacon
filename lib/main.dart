@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as path;
 import 'package:sqflite/sqflite.dart';
@@ -15,6 +16,10 @@ import 'package:window_manager/window_manager.dart';
 import 'package:system_tray/system_tray.dart';
 import 'package:launch_at_startup/launch_at_startup.dart';
 import 'package:home_widget/home_widget.dart';
+import 'package:http/http.dart' as http;
+import 'package:pdf/pdf.dart' as pdfLib;
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
 
 Future<void> _initHomeWidget() async {
   try { await HomeWidget.setAppGroupId('group.onyxbeacon'); } catch(e){ debugPrint('HomeWidget: $e'); }
@@ -97,7 +102,7 @@ class DatabaseHelper {
 
     return await openDatabase(
       dbP,
-      version: 6,
+      version: 7,
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
@@ -153,7 +158,10 @@ class DatabaseHelper {
         category TEXT NOT NULL,
         mood TEXT NOT NULL,
         date TEXT NOT NULL,
-        color TEXT DEFAULT '#9B59B6'
+        color TEXT DEFAULT '#9B59B6',
+        status TEXT DEFAULT 'Idea',
+        word_count INTEGER DEFAULT 0,
+        order_index INTEGER DEFAULT 0
       )
     ''');
 
@@ -232,6 +240,11 @@ class DatabaseHelper {
       try { await db.execute('ALTER TABLE habits ADD COLUMN color TEXT DEFAULT "#FF6B6B"'); } catch (_) {}
       try { await db.execute('ALTER TABLE finance_categories ADD COLUMN color TEXT DEFAULT "#4ECDC4"'); } catch (_) {}
       try { await db.execute('ALTER TABLE journal_entries ADD COLUMN color TEXT DEFAULT "#9B59B6"'); } catch (_) {}
+    }
+    if (oldVersion < 7) {
+      try { await db.execute('ALTER TABLE journal_entries ADD COLUMN status TEXT DEFAULT "Idea"'); } catch (_) {}
+      try { await db.execute('ALTER TABLE journal_entries ADD COLUMN word_count INTEGER DEFAULT 0'); } catch (_) {}
+      try { await db.execute('ALTER TABLE journal_entries ADD COLUMN order_index INTEGER DEFAULT 0'); } catch (_) {}
     }
   }
 
@@ -444,7 +457,7 @@ class ExportService {
   }
   static Future<void> exportFullBackup() async {
     final allData = await DatabaseHelper.instance.getAllDataForExport();
-    final Map<String, dynamic> backup = {'exported_at': DateTime.now().toIso8601String(), 'version': 6, 'tables': {for (var t in allData) t['table'] as String: t['data']}};
+    final Map<String, dynamic> backup = {'exported_at': DateTime.now().toIso8601String(), 'version': 7, 'tables': {for (var t in allData) t['table'] as String: t['data']}};
     final fileName = 'onyx_beacon_full_backup_${DateFormat('yyyy-MM-dd_HH-mm').format(DateTime.now())}.json';
     await exportJson(fileName, backup);
     await _updateHomeWidget();
@@ -452,7 +465,7 @@ class ExportService {
   static Future<void> exportEncryptedBackup(String password) async {
     try {
       final allData = await DatabaseHelper.instance.getAllDataForExport();
-      final backup = {'exported_at': DateTime.now().toIso8601String(), 'version': 6, 'encrypted': true, 'tables': {for (var t in allData) t['table'] as String: t['data']}};
+      final backup = {'exported_at': DateTime.now().toIso8601String(), 'version': 7, 'encrypted': true, 'tables': {for (var t in allData) t['table'] as String: t['data']}};
       final jsonStr = const JsonEncoder.withIndent('  ').convert(backup);
       final keyBytes = crypto.sha256.convert(utf8.encode(password)).bytes;
       final key = enc.Key(Uint8List.fromList(keyBytes));
@@ -486,7 +499,296 @@ class ExportService {
   }
 }
 
+
+// ==================== PUSH 4 SOVEREIGN SERVICES ====================
+// Writing Status Enum
+enum WritingStatus { Idea, Drafting, Revision, Complete }
+extension WritingStatusExt on WritingStatus {
+  String get label => toString().split('.').last;
+  Color get color {
+    switch(this){
+      case WritingStatus.Idea: return const Color(0xFFFFEAA7);
+      case WritingStatus.Drafting: return const Color(0xFF45B7D1);
+      case WritingStatus.Revision: return const Color(0xFFFF6B6B);
+      case WritingStatus.Complete: return const Color(0xFF96CEB4);
+    }
+  }
+  IconData get icon {
+    switch(this){
+      case WritingStatus.Idea: return Icons.lightbulb_outline;
+      case WritingStatus.Drafting: return Icons.edit_outlined;
+      case WritingStatus.Revision: return Icons.auto_fix_high_outlined;
+      case WritingStatus.Complete: return Icons.check_circle_outline;
+    }
+  }
+  static WritingStatus fromString(String s){
+    switch(s){
+      case 'Drafting': return WritingStatus.Drafting;
+      case 'Revision': return WritingStatus.Revision;
+      case 'Complete': return WritingStatus.Complete;
+      default: return WritingStatus.Idea;
+    }
+  }
+}
+
+// --- AERO Service (Local Ollama) ---
+class AiCopilotService {
+  static String baseUrl = 'http://localhost:11434';
+  static String model = 'llama3';
+  static Future<bool> checkConnection() async {
+    try {
+      final res = await http.get(Uri.parse('$baseUrl/api/tags')).timeout(const Duration(seconds: 3));
+      return res.statusCode == 200;
+    } catch(_) { return false; }
+  }
+  static Future<String> improveText(String text, {String instruction = 'Improve this writing, keep voice, fix grammar'}) async {
+    try {
+      final prompt = '$instruction:\n\n$text';
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/generate'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'model': model, 'prompt': prompt, 'stream': false}),
+      ).timeout(const Duration(seconds: 30));
+      if(res.statusCode==200){
+        final data = jsonDecode(res.body);
+        return data['response'] ?? 'No response';
+      }
+      return 'AI Error: ${res.statusCode}';
+    } catch(e){ return 'AI Offline: $e\n\nTip: Run Ollama locally: ollama run llama3'; }
+  }
+  static Future<String> summarize(String text) => improveText(text, instruction: 'Summarize this in 3 bullet points, keep key ideas');
+  static Future<String> expand(String text) => improveText(text, instruction: 'Expand this with vivid detail, keep same style, double length');
+  static Future<String> critique(String text) => improveText(text, instruction: 'Critique this as an editor: strengths, weaknesses, 3 specific improvements');
+  static Future<void> setCustomEndpoint(String url, String m) async {
+    baseUrl = url; model = m;
+  }
+}
+
+// --- P2P Sync Service (Local Wi-Fi, zero cloud) ---
+class P2PSyncService {
+  static HttpServer? _server;
+  static bool _isServing = false;
+  static String? _localIp;
+  static Future<String> getLocalIp() async {
+    try {
+      for (var interface in await NetworkInterface.list()) {
+        for (var addr in interface.addresses) {
+          if (addr.type == InternetAddressType.IPv4 && !addr.isLoopback) {
+            if (addr.address.startsWith('192.') || addr.address.startsWith('10.') || addr.address.startsWith('172.')) {
+              _localIp = addr.address;
+              return addr.address;
+            }
+          }
+        }
+      }
+    } catch(_){}
+    return '127.0.0.1';
+  }
+  static Future<bool> startServer() async {
+    try {
+      final dbPath = await getDatabasesPath();
+      final filePath = path.join(dbPath, 'onyx_beacon.db');
+      final ip = await getLocalIp();
+      _server = await HttpServer.bind(InternetAddress.anyIPv4, 8765);
+      _isServing = true;
+      _server!.listen((HttpRequest req) async {
+        if(req.uri.path == '/db'){
+          final file = File(filePath);
+          if(await file.exists()){
+            req.response.headers.set('Content-Type', 'application/octet-stream');
+            req.response.headers.set('Content-Disposition', 'attachment; filename=onyx_beacon.db');
+            await req.response.addStream(file.openRead());
+            await req.response.close();
+          } else {
+            req.response.statusCode = 404;
+            req.response.write('DB not found');
+            await req.response.close();
+          }
+        } else if(req.uri.path == '/status'){
+          req.response.headers.contentType = ContentType.json;
+          req.response.write(jsonEncode({'status':'Onyx Beacon Sync Server','ip':ip,'port':8765,'db_size': await File(filePath).length()}));
+          await req.response.close();
+        } else {
+          req.response.write('Onyx Beacon P2P Sync — GET /db to download, /status for info');
+          await req.response.close();
+        }
+      });
+      return true;
+    } catch(e){ debugPrint('P2P server error: $e'); return false; }
+  }
+  static Future<void> stopServer() async {
+    try { await _server?.close(); _isServing=false; } catch(_){}
+  }
+  static bool get isServing => _isServing;
+  static String? get serverIp => _localIp;
+  static Future<bool> syncFromServer(String serverIp) async {
+    try {
+      final url = 'http://$serverIp:8765/db';
+      final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 15));
+      if(res.statusCode==200){
+        final dbPath = await getDatabasesPath();
+        final filePath = path.join(dbPath, 'onyx_beacon.db');
+        final backupPath = path.join(dbPath, 'onyx_beacon_backup_${DateTime.now().millisecondsSinceEpoch}.db');
+        final current = File(filePath);
+        if(await current.exists()) await current.copy(backupPath);
+        await File(filePath).writeAsBytes(res.bodyBytes);
+        return true;
+      }
+      return false;
+    } catch(e){ debugPrint('P2P client error: $e'); return false; }
+  }
+}
+
+// --- Weekly Review PDF Service ---
+class WeeklyReviewService {
+  static Future<String> generateWeeklyPdf() async {
+    try {
+      final db = await DatabaseHelper.instance.database;
+      final now = DateTime.now();
+      final weekAgo = now.subtract(const Duration(days: 7));
+      final weekAgoStr = DateFormat('yyyy-MM-dd').format(weekAgo);
+      final todayStr = DateFormat('yyyy-MM-dd').format(now);
+      
+      final habits = await db.query('habits');
+      final completions = await db.query('habit_completions', where: 'completed_date >= ?', whereArgs: [weekAgoStr]);
+      final tasks = await db.query('tasks');
+      final tasksCompleted = await db.rawQuery('SELECT COUNT(*) as c FROM tasks WHERE isCompleted=1');
+      final txs = await db.query('transactions', where: 'date >= ?', whereArgs: [weekAgoStr]);
+      final journals = await db.query('journal_entries', where: 'date >= ?', whereArgs: [weekAgoStr]);
+      
+      double income=0, expense=0;
+      for(var t in txs){ final amt=(t['amount'] as num).toDouble(); if(t['type']=='Income') income+=amt; else expense+=amt; }
+      int totalWords=0;
+      for(var j in journals){ totalWords+= (j['content'] as String).split(RegExp(r'\s+')).length; }
+      
+      final pdf = pw.Document();
+      pdf.addPage(
+        pw.MultiPage(
+          pageFormat: pdfLib.PdfPageFormat.a4,
+          build: (ctx) => [
+            pw.Header(
+              level: 0,
+              child: pw.Text(
+                'Onyx Beacon — Weekly Life Review',
+                style: pw.TextStyle(
+                  fontSize: 22,
+                  fontWeight: pw.FontWeight.bold,
+                ),
+              ),
+            ),
+            pw.Text(
+              'Period: $weekAgoStr to $todayStr — '
+              'Generated: ${DateFormat('yyyy-MM-dd HH:mm').format(now)}',
+              style: pw.TextStyle(
+                fontSize: 10,
+                color: pdfLib.PdfColors.grey,
+              ),
+            ),
+            pw.SizedBox(height: 12),
+            pw.Text(
+              'Executive Summary',
+              style: pw.TextStyle(
+                fontSize: 16,
+                fontWeight: pw.FontWeight.bold,
+              ),
+            ),
+            pw.Bullet(
+              text: 'Habits Tracked: ${habits.length} — '
+              'Completions This Week: ${completions.length}',
+            ),
+            pw.Bullet(
+              text: 'Tasks: ${tasks.length} total, '
+              '${tasksCompleted.first['c']} completed',
+            ),
+            pw.Bullet(
+              text: 'Finance: Income \$${income.toStringAsFixed(2)} — '
+              'Expense \$${expense.toStringAsFixed(2)} — '
+              'Net \$${(income-expense).toStringAsFixed(2)}',
+            ),
+            pw.Bullet(
+              text: 'Writing: ${journals.length} entries — '
+              '$totalWords words',
+            ),
+            pw.SizedBox(height: 16),
+            pw.Text(
+              'Habit Completions',
+              style: pw.TextStyle(
+                fontSize: 14,
+                fontWeight: pw.FontWeight.bold,
+              ),
+            ),
+            pw.Table.fromTextArray(
+              headers: ['Habit','Completions This Week'],
+              data: habits.map((h){
+                final count = completions.where(
+                  (c)=>c['habit_id']==h['id']
+                ).length;
+                return [h['name'], count.toString()];
+              }).toList(),
+            ),
+            pw.SizedBox(height: 12),
+            pw.Text(
+              'Finance Ledger — Past 7 Days',
+              style: pw.TextStyle(
+                fontSize: 14,
+                fontWeight: pw.FontWeight.bold,
+              ),
+            ),
+            pw.Table.fromTextArray(
+              headers: ['Date','Title','Type','Amount','Category'],
+              data: txs.map((t)=>[
+                t['date'],
+                t['title'],
+                t['type'],
+                '\$${t['amount']}',
+                t['category']
+              ]).toList(),
+            ),
+            pw.SizedBox(height: 12),
+            pw.Text(
+              'Writing Output',
+              style: pw.TextStyle(
+                fontSize: 14,
+                fontWeight: pw.FontWeight.bold,
+              ),
+            ),
+            pw.Table.fromTextArray(
+              headers: ['Date','Title','Category','Words'],
+              data: journals.map((j){
+                final wc = (j['content'] as String).split(
+                  RegExp(r'\s+')
+                ).length;
+                return [
+                  j['date'],
+                  j['title'],
+                  j['category'],
+                  wc.toString()
+                ];
+              }).toList(),
+            ),
+          ],
+        ),
+      );
+      
+      final dir = await getApplicationDocumentsDirectory();
+      final reportsDir = Directory(path.join(dir.path, 'OnyxBeacon','reports'));
+      if(!await reportsDir.exists()) await reportsDir.create(recursive: true);
+      final fileName = 'Weekly_Review_${DateFormat('yyyy-MM-dd').format(now)}.pdf';
+      final file = File(path.join(reportsDir.path, fileName));
+      await file.writeAsBytes(await pdf.save());
+      return file.path;
+    } catch(e){ debugPrint('PDF error: $e'); return ''; }
+  }
+  static Future<void> shareWeeklyPdf() async {
+    final pdfPath = await generateWeeklyPdf();
+    if(pdfPath.isNotEmpty){
+      await Share.shareXFiles([XFile(pdfPath)], text: 'Onyx Beacon Weekly Review');
+    }
+  }
+}
+
 // ==================== COLOR CODES + DAILY BRIEFING WIDGET ====================
+
 class ColorCodes {
   static const List<String> palette = [
     '#FF6B6B',
@@ -774,6 +1076,7 @@ class _MainDashboardShellState extends State<MainDashboardShell> {
     TasksTab(),
     FinanceTab(),
     JournalTab(),
+    AiChatTab(),
   ];
 
   @override
@@ -813,13 +1116,19 @@ class _MainDashboardShellState extends State<MainDashboardShell> {
             selectedIcon: Icon(Icons.book),
             label: 'Writing Hub',
           ),
+          NavigationDestination(
+            icon: Icon(Icons.smart_toy_outlined),
+            selectedIcon: Icon(Icons.smart_toy),
+            label: 'AI Chat',
+          ),
         ],
       ),
     );
   }
 }
 
-// ==================== 1. COMMAND DASHBOARD TAB (with Global Search) ====================
+
+// ==================== 1. COMMAND DASHBOARD TAB (PUSH 4 Sovereign) ====================
 class DashboardHomeTab extends StatefulWidget {
   const DashboardHomeTab({super.key});
 
@@ -835,11 +1144,15 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
   int _taskCount = 0;
   int _txCount = 0;
   int _journalCount = 0;
+  double _weeklyNet = 0;
+  int _weeklyWords = 0;
+  List<Map<String, dynamic>> _recentCompletions = [];
 
   @override
   void initState() {
     super.initState();
     _loadCounts();
+    _loadAnalytics();
   }
 
   Future<void> _loadCounts() async {
@@ -856,11 +1169,24 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
     });
   }
 
+  Future<void> _loadAnalytics() async {
+    try {
+      final db = await DatabaseHelper.instance.database;
+      final weekAgo = DateFormat('yyyy-MM-dd').format(DateTime.now().subtract(const Duration(days: 7)));
+      final txs = await db.query('transactions', where: 'date >= ?', whereArgs: [weekAgo]);
+      double net = 0;
+      for(var t in txs){ final amt = (t['amount'] as num).toDouble(); net += t['type']=='Income'?amt:-amt; }
+      final journals = await db.query('journal_entries', where: 'date >= ?', whereArgs: [weekAgo]);
+      int words = 0;
+      for(var j in journals){ words += (j['content'] as String).split(RegExp(r'\s+')).length; }
+      final completions = await db.query('habit_completions', where: 'completed_date >= ?', whereArgs: [weekAgo], orderBy: 'completed_date DESC', limit: 10);
+      setState((){ _weeklyNet = net; _weeklyWords = words; _recentCompletions = completions; });
+    } catch(_){}
+  }
+
   Future<void> _doSearch(String query) async {
     if (query.trim().isEmpty) {
-      setState(() {
-        _searchResults = null;
-      });
+      setState(() { _searchResults = null; });
       return;
     }
     setState(() => _isSearching = true);
@@ -882,81 +1208,89 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
         ),
         titleSpacing: 16,
         actions: [
-          IconButton(
-            icon: const Icon(Icons.backup_outlined),
-            tooltip: 'Full Backup JSON',
-            onPressed: () => ExportService.exportFullBackup(),
-          ),
+          IconButton(icon: const Icon(Icons.picture_as_pdf), tooltip: 'Weekly PDF Review', onPressed: () => WeeklyReviewService.shareWeeklyPdf()),
+          IconButton(icon: const Icon(Icons.backup_outlined), tooltip: 'Full Backup JSON', onPressed: () => ExportService.exportFullBackup()),
         ],
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(16.0),
-        children: [
-          const Text(
-            'Welcome back, Caleb.',
-            style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _searchController,
-            decoration: InputDecoration(
-              hintText: 'Global search: habits, tasks, finance, writing...',
-              prefixIcon: const Icon(Icons.search),
-              suffixIcon: _searchController.text.isNotEmpty
-                  ? IconButton(
-                      icon: const Icon(Icons.clear),
-                      onPressed: () {
-                        _searchController.clear();
-                        _doSearch('');
-                      },
-                    )
-                  : null,
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-            ),
-            onChanged: _doSearch,
-            onSubmitted: _doSearch,
-          ),
-          const SizedBox(height: 16),
-          if (_searchResults != null) ...[
-            if (_isSearching) const LinearProgressIndicator(),
-            const SizedBox(height: 8),
-            Text('Search Results for "${_searchController.text}"', style: const TextStyle(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-            ..._buildSearchResults(),
-            const Divider(height: 32),
-          ],
-          GridView.count(
-            crossAxisCount: 2,
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            crossAxisSpacing: 12,
-            mainAxisSpacing: 12,
-            childAspectRatio: 1.5,
+      body: LayoutBuilder(
+        builder: (ctx, constraints){
+          final isWide = constraints.maxWidth > 600;
+          return ListView(
+            padding: const EdgeInsets.all(16.0),
             children: [
-              MetricCard(title: 'Habits', value: '$_habitCount Tracked', icon: Icons.bolt, color: Colors.orange),
-              MetricCard(title: 'Tasks', value: '$_taskCount Active', icon: Icons.task_alt, color: Colors.blue),
-              MetricCard(title: 'Finance Ledger', value: '$_txCount Transactions', icon: Icons.account_balance_wallet, color: Colors.green),
-              MetricCard(title: 'Writing Studio', value: '$_journalCount Drafts', icon: Icons.menu_book, color: Colors.purple),
-              MetricCard(title: 'Database Engine', value: 'SQLite v5 Live', icon: Icons.storage, color: Colors.indigo),
-              MetricCard(title: 'Export Center', value: 'JSON / CSV Ready', icon: Icons.file_download, color: Colors.teal),
-            ],
-          ),
-          const SizedBox(height: 24),
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.file_download_outlined),
-              title: const Text('Quick Export'),
-              subtitle: const Text('Backup entire vault as JSON'),
-              trailing: ElevatedButton(
-                onPressed: () => ExportService.exportFullBackup(),
-                child: const Text('Export'),
+              const Text('Welcome back, Caleb.', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 16),
+              const DailyBriefingWidget(),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _searchController,
+                decoration: InputDecoration(
+                  hintText: 'Global search: habits, tasks, finance, writing...',
+                  prefixIcon: const Icon(Icons.search),
+                  suffixIcon: _searchController.text.isNotEmpty ? IconButton(icon: const Icon(Icons.clear), onPressed: (){ _searchController.clear(); _doSearch(''); }) : null,
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                onChanged: _doSearch,
+                onSubmitted: _doSearch,
               ),
-            ),
-          ),
-        ],
+              const SizedBox(height: 16),
+              if (_searchResults != null) ...[
+                if (_isSearching) const LinearProgressIndicator(),
+                const SizedBox(height: 8),
+                Text('Search Results for "${_searchController.text}"', style: const TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                ..._buildSearchResults(),
+                const Divider(height: 32),
+              ],
+              GridView.count(
+                crossAxisCount: isWide ? 3 : 2,
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                crossAxisSpacing: 12,
+                mainAxisSpacing: 12,
+                childAspectRatio: 2.2,
+                children: [
+                  MetricCard(title: 'Habits', value: '$_habitCount Tracked', icon: Icons.bolt, color: Colors.orange),
+                  MetricCard(title: 'Tasks', value: '$_taskCount Active', icon: Icons.task_alt, color: Colors.blue),
+                  MetricCard(title: 'Finance Ledger', value: '$_txCount Transactions', icon: Icons.account_balance_wallet, color: Colors.green),
+                  MetricCard(title: 'Writing Studio', value: '$_journalCount Drafts', icon: Icons.menu_book, color: Colors.purple),
+                  MetricCard(title: 'Weekly Net', value: '\$${_weeklyNet.toStringAsFixed(0)}', icon: Icons.trending_up, color: _weeklyNet>=0?Colors.green:Colors.red),
+                  MetricCard(title: 'Words This Week', value: '$_weeklyWords words', icon: Icons.edit_note, color: Colors.indigo),
+                ],
+              ),
+              const SizedBox(height: 16),
+              const Text('Cross-Module Analytics', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              CrossModuleAnalyticsWidget(weeklyNet: _weeklyNet, weeklyWords: _weeklyWords, habitCount: _habitCount),
+              const SizedBox(height: 16),
+              const Text('Habit Heatmap — Last 42 Days', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              const HabitHeatmapWidget(),
+              const SizedBox(height: 16),
+              const WeeklyReviewCard(),
+              
+              const P2PSyncCard(),
+              const SizedBox(height: 12),
+              const AiCopilotStatusCard(),
+              const SizedBox(height: 12),
+              Card(
+                child: ListTile(
+                  leading: const Icon(Icons.file_download_outlined),
+                  title: const Text('Quick Export'),
+                  subtitle: const Text('Backup entire vault as JSON / Encrypted .enc'),
+                  trailing: Row(mainAxisSize: MainAxisSize.min, children:[
+                    IconButton(icon: const Icon(Icons.lock_outline), tooltip: 'Encrypted .enc', onPressed: ()=>_showEncryptedDialog(context)),
+                    ElevatedButton(onPressed: () => ExportService.exportFullBackup(), child: const Text('Export')),
+                  ]),
+                ),
+              ),
+            ],
+          );
+        }
       ),
     );
   }
+
 
   void _showEncryptedDialog(BuildContext context){
     final c = TextEditingController();
@@ -971,27 +1305,19 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
     final List<Widget> widgets = [];
     _searchResults!.forEach((key, list) {
       if (list.isNotEmpty) {
-        widgets.add(Padding(
-          padding: const EdgeInsets.symmetric(vertical: 4),
-          child: Text('$key: ${list.length} found', style: TextStyle(color: Colors.grey.shade700, fontWeight: FontWeight.w600)),
-        ));
+        widgets.add(Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: Text('$key: ${list.length} found', style: TextStyle(color: Colors.grey.shade700, fontWeight: FontWeight.w600))));
         for (var item in list.take(3)) {
           String title = item['name'] ?? item['title'] ?? 'Untitled';
-          widgets.add(ListTile(
-            dense: true,
-            title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
-            subtitle: Text(key),
-            leading: const Icon(Icons.search, size: 16),
-          ));
+          widgets.add(ListTile(dense: true, title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis), subtitle: Text(key), leading: const Icon(Icons.search, size: 16)));
         }
       }
     });
-    if (widgets.isEmpty) {
-      widgets.add(const ListTile(title: Text('No results found')));
-    }
+    if (widgets.isEmpty) widgets.add(const ListTile(title: Text('No results found')));
     return widgets;
   }
 }
+
+
 
 class MetricCard extends StatelessWidget {
   final String title;
@@ -1015,13 +1341,20 @@ class MetricCard extends StatelessWidget {
         padding: const EdgeInsets.all(12.0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisAlignment: MainAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
             Row(
               children: [
-                Icon(icon, color: color, size: 20),
-                const SizedBox(width: 8),
-                Text(title, style: const TextStyle(fontSize: 13, color: Colors.grey)),
+                Icon(icon, color: color, size: 18),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    title,
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 8),
@@ -1961,9 +2294,353 @@ class _FinanceTabState extends State<FinanceTab> {
 }
 
 // ==================== 5. JOURNAL & WRITING STUDIO TAB (with Search + Export) ====================
+
+// ==================== PUSH 4 WIDGETS — Analytics, Heatmap, Weekly Review, P2P, AI ====================
+class CrossModuleAnalyticsWidget extends StatefulWidget {
+  final double weeklyNet;
+  final int weeklyWords;
+  final int habitCount;
+  const CrossModuleAnalyticsWidget({super.key, required this.weeklyNet, required this.weeklyWords, required this.habitCount});
+  @override
+  State<CrossModuleAnalyticsWidget> createState() => _CrossModuleAnalyticsWidgetState();
+}
+class _CrossModuleAnalyticsWidgetState extends State<CrossModuleAnalyticsWidget> {
+  List<FlSpot> _habitSpots = [];
+  List<FlSpot> _writingSpots = [];
+  List<FlSpot> _financeSpots = [];
+  @override
+  void initState(){ super.initState(); _loadCorrelation(); }
+  Future<void> _loadCorrelation() async {
+    try {
+      final db = await DatabaseHelper.instance.database;
+      List<FlSpot> hSpots = [], wSpots = [], fSpots = [];
+      for(int i=6; i>=0; i--){
+        final date = DateTime.now().subtract(Duration(days: i));
+        final dateStr = DateFormat('yyyy-MM-dd').format(date);
+        final completions = await db.query('habit_completions', where: 'completed_date = ?', whereArgs: [dateStr]);
+        final journals = await db.query('journal_entries', where: 'date = ?', whereArgs: [dateStr]);
+        final txs = await db.query('transactions', where: 'date = ?', whereArgs: [dateStr]);
+        int words = 0;
+        for(var j in journals){ words += (j['content'] as String).split(RegExp(r'\s+')).length; }
+        double net = 0;
+        for(var t in txs){ final amt=(t['amount'] as num).toDouble(); net += t['type']=='Income'?amt:-amt; }
+        hSpots.add(FlSpot((6-i).toDouble(), completions.length.toDouble()));
+        wSpots.add(FlSpot((6-i).toDouble(), (words/100).clamp(0,10).toDouble()));
+        fSpots.add(FlSpot((6-i).toDouble(), (net/50).clamp(-5,5).toDouble()));
+      }
+      setState(()=>{ _habitSpots=hSpots, _writingSpots=wSpots, _financeSpots=fSpots });
+    } catch(_){}
+  }
+  @override
+  Widget build(BuildContext context){
+    return Card(
+      elevation: 2,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children:[
+              const Icon(Icons.analytics_outlined, size: 18),
+              const SizedBox(width:6),
+              const Text('7-Day Correlation — Habits vs Writing vs Finance', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+              const Spacer(),
+              IconButton(icon: const Icon(Icons.refresh, size:16), onPressed: _loadCorrelation),
+            ]),
+            const SizedBox(height: 8),
+            SizedBox(
+              height: 140,
+              child: LineChart(
+                LineChartData(
+                  gridData: FlGridData(show: true, drawVerticalLine: false),
+                  titlesData: FlTitlesData(
+                    bottomTitles: AxisTitles(sideTitles: SideTitles(showTitles: true, getTitlesWidget: (v,meta){ const days=['6d','5d','4d','3d','2d','1d','Today']; final idx=v.toInt(); if(idx>=0&&idx<7) return Text(days[idx], style: const TextStyle(fontSize: 9)); return const Text(''); })),
+                    leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                    topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                    rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  ),
+                  borderData: FlBorderData(show: false),
+                  lineBarsData: [
+                    LineChartBarData(spots: _habitSpots, isCurved: true, color: Colors.orange, barWidth: 2, dotData: FlDotData(show: true)),
+                    LineChartBarData(spots: _writingSpots, isCurved: true, color: Colors.purple, barWidth: 2, dotData: FlDotData(show: true)),
+                    LineChartBarData(spots: _financeSpots, isCurved: true, color: Colors.green, barWidth: 2, dotData: FlDotData(show: true)),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children:[
+              _legendDot('Habits', Colors.orange),
+              _legendDot('Writing (words/100)', Colors.purple),
+              _legendDot('Finance (net/50)', Colors.green),
+            ]),
+          ],
+        ),
+      ),
+    );
+  }
+  Widget _legendDot(String label, Color c){ return Row(children:[Container(width:10,height:10,decoration:BoxDecoration(color:c, shape: BoxShape.circle)), const SizedBox(width:4), Text(label, style: const TextStyle(fontSize:10))]); }
+}
+
+class HabitHeatmapWidget extends StatefulWidget {
+  const HabitHeatmapWidget({super.key});
+  @override
+  State<HabitHeatmapWidget> createState() => _HabitHeatmapWidgetState();
+}
+class _HabitHeatmapWidgetState extends State<HabitHeatmapWidget> {
+  Map<String, int> _heatData = {};
+  int _maxCount = 1;
+  @override
+  void initState(){ super.initState(); _loadHeatmap(); }
+  Future<void> _loadHeatmap() async {
+    try {
+      final db = await DatabaseHelper.instance.database;
+      final start = DateFormat('yyyy-MM-dd').format(DateTime.now().subtract(const Duration(days: 42)));
+      final completions = await db.query('habit_completions', where: 'completed_date >= ?', whereArgs: [start]);
+      Map<String,int> map={};
+      for(var c in completions){ final d=c['completed_date'] as String; map[d]=(map[d]??0)+1; }
+      int maxV = 1;
+      if(map.isNotEmpty) maxV = map.values.reduce((a,b)=>a>b?a:b);
+      setState(()=>{ _heatData=map, _maxCount=maxV>0?maxV:1 });
+    } catch(_){}
+  }
+  @override
+  Widget build(BuildContext context){
+    final days = List.generate(42, (i)=>DateTime.now().subtract(Duration(days: 83-i)));
+    return Card(
+      elevation: 2,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children:[const Icon(Icons.calendar_view_month_outlined, size:18), const SizedBox(width:6), const Text('GitHub-Style Heatmap — 42 Days', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)), const Spacer(), IconButton(icon: const Icon(Icons.refresh, size:16), onPressed: _loadHeatmap)]),
+            const SizedBox(height: 8),
+            GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 7, crossAxisSpacing: 3, mainAxisSpacing: 3, childAspectRatio: 1),
+              itemCount: 42,
+              itemBuilder: (ctx, idx){
+                final date = days[idx];
+                final dateStr = DateFormat('yyyy-MM-dd').format(date);
+                final count = _heatData[dateStr] ?? 0;
+                final intensity = (count/_maxCount).clamp(0.0,1.0);
+                Color color;
+                if(count==0) color = Colors.grey.shade200;
+                else if(intensity<0.25) color = Colors.orange.shade100;
+                else if(intensity<0.5) color = Colors.orange.shade300;
+                else if(intensity<0.75) color = Colors.orange.shade600;
+                else color = Colors.orange.shade800;
+                return Tooltip(message: '$dateStr: $count', child: Container(decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(3), border: Border.all(color: Colors.white, width: 0.5))));
+              },
+            ),
+            const SizedBox(height: 6),
+            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children:[Text('42 days ago', style: TextStyle(fontSize: 9, color: Colors.grey.shade600)), Text('Today — Max $_maxCount/day', style: TextStyle(fontSize: 9, color: Colors.grey.shade600))]),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class WeeklyReviewCard extends StatefulWidget {
+  const WeeklyReviewCard({super.key});
+  @override
+  State<WeeklyReviewCard> createState() => _WeeklyReviewCardState();
+}
+class _WeeklyReviewCardState extends State<WeeklyReviewCard> {
+  bool _generating = false;
+  @override
+  Widget build(BuildContext context){
+    return Card(
+      elevation: 2,
+      color: Colors.indigo.shade50,
+      child: ListTile(
+        leading: const Icon(Icons.picture_as_pdf, color: Colors.indigo),
+        title: const Text('Weekly Life Review PDF', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+        subtitle: const Text('Last 7 days — habits, tasks, finance, writing — local PDF', style: TextStyle(fontSize: 11)),
+        trailing: _generating
+            ? const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : ElevatedButton.icon(
+                icon: const Icon(Icons.picture_as_pdf, size: 16),
+                label: const Text('Generate'),
+                onPressed: () async {
+                  setState(()=>_generating=true);
+                  await WeeklyReviewService.shareWeeklyPdf();
+                  setState(()=>_generating=false);
+                  if(mounted){
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'Weekly PDF generated & share sheet opened',
+                        ),
+                      ),
+                    );
+                  }
+                },
+              ),
+      ),
+    );
+  }
+}
+
+class P2PSyncCard extends StatefulWidget {
+  const P2PSyncCard({super.key});
+  @override
+  State<P2PSyncCard> createState() => _P2PSyncCardState();
+}
+class _P2PSyncCardState extends State<P2PSyncCard> {
+  String _ip = 'Loading...';
+  bool _serving = false;
+  final _ipController = TextEditingController();
+  @override
+  void initState(){ super.initState(); _loadIp(); }
+  Future<void> _loadIp() async { final ip = await P2PSyncService.getLocalIp(); setState(()=>_ip=ip); }
+  @override
+  Widget build(BuildContext context){
+    return Card(
+      elevation: 2,
+      color: Colors.teal.shade50,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children:[const Icon(Icons.sync_alt, size:18, color: Colors.teal), const SizedBox(width:6), const Text('P2P Sync — Local Wi-Fi (Zero Cloud)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)), const Spacer(), if(_serving) const Chip(label: Text('Serving', style: TextStyle(fontSize: 10)), backgroundColor: Colors.green, visualDensity: VisualDensity.compact)]),
+            const SizedBox(height: 8),
+            Text('This device IP: $_ip:8765 — Windows host starts server, iPhone 17 Pro Max enters IP to pull onyx_beacon.db directly over local Wi-Fi. No cloud, no fees.', style: const TextStyle(fontSize: 10, color: Colors.grey)),
+            const SizedBox(height: 8),
+            Row(children:[
+              Expanded(
+                child: ElevatedButton.icon(
+                  icon: Icon(_serving?Icons.stop:Icons.play_arrow),
+                  label: Text(
+                    _serving?'Stop Server':'Start Server (Host)',
+                  ),
+                  onPressed: () async {
+                    if(_serving){
+                      await P2PSyncService.stopServer();
+                      setState(()=>_serving=false);
+                    } else {
+                      final ok = await P2PSyncService.startServer();
+                      setState(()=>_serving=ok);
+                      if(ok&&mounted){
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              'P2P Server at http://$_ip:8765/db',
+                            ),
+                          ),
+                        );
+                      }
+                    }
+                  },
+                ),
+              ),
+              const SizedBox(width:8),
+              Expanded(child: OutlinedButton.icon(icon: const Icon(Icons.download), label: const Text('Sync From IP'), onPressed: ()=>_showSyncDialog())),
+            ]),
+          ],
+        ),
+      ),
+    );
+  }
+  void _showSyncDialog(){
+    showDialog(context: context, builder: (ctx)=>AlertDialog(
+      title: const Text('Sync from Host'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children:[
+          const Text(
+            'Enter Windows host IP (e.g., 192.168.1.15) — '
+            'both devices same Wi-Fi, host must have Started Server',
+            style: TextStyle(fontSize: 11),
+          ),
+          const SizedBox(height:12),
+          TextField(
+            controller: _ipController,
+            decoration: const InputDecoration(
+              labelText: 'Host IP',
+              hintText: '192.168.1.15',
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ],
+      ),
+      actions:[
+        TextButton(
+          onPressed: ()=>Navigator.pop(ctx),
+          child: const Text('Cancel'),
+        ),
+        ElevatedButton(
+          onPressed: () async {
+            final ip=_ipController.text.trim();
+            if(ip.isNotEmpty){
+              Navigator.pop(ctx);
+              final ok = await P2PSyncService.syncFromServer(ip);
+              if(mounted){
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      ok
+                          ?'Sync success! Restart app. Backup saved.'
+                          :'Sync failed — check IP & host server',
+                    ),
+                  ),
+                );
+              }
+            }
+          },
+          child: const Text('Pull DB'),
+        ),
+      ],
+    ));
+  }
+}
+
+class AiCopilotStatusCard extends StatefulWidget {
+  const AiCopilotStatusCard({super.key});
+  @override
+  State<AiCopilotStatusCard> createState() => _AiCopilotStatusCardState();
+}
+class _AiCopilotStatusCardState extends State<AiCopilotStatusCard> {
+  bool? _online;
+  String _url = AiCopilotService.baseUrl;
+  @override
+  void initState(){ super.initState(); _check(); }
+  Future<void> _check() async { final ok = await AiCopilotService.checkConnection(); setState(()=>_online=ok); }
+  @override
+  Widget build(BuildContext context){
+    return Card(
+      elevation: 2,
+      color: Colors.purple.shade50,
+      child: ListTile(
+        leading: Icon(Icons.smart_toy_outlined, color: _online==true?Colors.green:Colors.grey),
+        title: const Text('Local AERO — Ollama', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+        subtitle: Text('Endpoint: $_url — Status: ${_online==null?'Checking...':_online!?'Online ✓':'Offline — run ollama run llama3'}', style: const TextStyle(fontSize: 10)),
+        trailing: IconButton(icon: const Icon(Icons.settings, size:18), onPressed: ()=>_showSettings()),
+      ),
+    );
+  }
+  void _showSettings(){
+    final urlCtrl = TextEditingController(text: AiCopilotService.baseUrl);
+    final modelCtrl = TextEditingController(text: AiCopilotService.model);
+    showDialog(context: context, builder: (ctx)=>AlertDialog(
+      title: const Text('AERO Settings'),
+      content: Column(mainAxisSize: MainAxisSize.min, children:[TextField(controller: urlCtrl, decoration: const InputDecoration(labelText: 'Ollama URL', hintText: 'http://localhost:11434')), const SizedBox(height:8), TextField(controller: modelCtrl, decoration: const InputDecoration(labelText: 'Model', hintText: 'llama3'))]),
+      actions:[TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text('Cancel')), ElevatedButton(onPressed: (){ AiCopilotService.setCustomEndpoint(urlCtrl.text.trim(), modelCtrl.text.trim()); setState(()=>_url=urlCtrl.text.trim()); Navigator.pop(ctx); _check(); }, child: const Text('Save'))],
+    ));
+  }
+}
+
+// ==================== 5. WRITING HUB — PUSH 4 KANBAN + AI COPILOT ====================
 class JournalTab extends StatefulWidget {
   const JournalTab({super.key});
-
   @override
   State<JournalTab> createState() => _JournalTabState();
 }
@@ -1972,220 +2649,596 @@ class _JournalTabState extends State<JournalTab> {
   List<Map<String, dynamic>> _entries = [];
   List<Map<String, dynamic>> _filteredEntries = [];
   String _selectedFilter = 'All';
+  String _selectedStatusFilter = 'All';
   String _searchQuery = '';
+  bool _isKanbanView = false;
   final TextEditingController _searchController = TextEditingController();
-  final List<String> _writingCategories = ['Daily Reflection', 'Thought / Idea', 'Article', 'Short Story', 'Book Chapter', 'Screenplay'];
-  final List<String> _moods = ['⚡ Creative', '🔥 Focused', '✨ Inspired', '😌 Calm', '🌧 Reflective', '🔋 Exhausted'];
+  final List<String> _writingCategories = ['Book Chapter', 'Screenplay', 'Article', 'Short Story', 'Journal', 'Idea', 'Research'];
+  final List<String> _moods = ['Focused', 'Inspired', 'Tired', 'Excited', 'Calm', 'Stressed', 'Reflective'];
+  final List<String> _statuses = ['Idea','Drafting','Revision','Complete'];
 
   @override
-  void initState() {
+  void initState(){
     super.initState();
     _refreshEntries();
   }
 
   Future<void> _refreshEntries() async {
-    try {
-      final entries = await DatabaseHelper.instance.getJournalEntries();
-      setState(() {
-        _entries = entries;
-      });
-      _applyFilters();
-    } catch (e) {
-      setState(() {
-        _entries = [];
-        _filteredEntries = [];
-      });
-    }
+    final entries = await DatabaseHelper.instance.getJournalEntries();
+    setState((){ _entries = entries; });
+    _applyFilters();
   }
 
-  void _applyFilters() {
+  void _applyFilters(){
     List<Map<String, dynamic>> result = List.from(_entries);
-    if (_selectedFilter != 'All') {
-      result = result.where((e) => e['category'] == _selectedFilter).toList();
-    }
-    if (_searchQuery.isNotEmpty) {
-      result = result.where((e) => (e['title'] as String).toLowerCase().contains(_searchQuery.toLowerCase()) || (e['content'] as String).toLowerCase().contains(_searchQuery.toLowerCase()) || (e['mood'] as String).toLowerCase().contains(_searchQuery.toLowerCase())).toList();
-    }
-    setState(() {
-      _filteredEntries = result;
-    });
+    if(_selectedFilter != 'All'){ result = result.where((e)=>e['category']==_selectedFilter).toList(); }
+    if(_selectedStatusFilter != 'All'){ result = result.where((e)=>(e['status']??'Idea')==_selectedStatusFilter).toList(); }
+    if(_searchQuery.isNotEmpty){ result = result.where((e)=>(e['title'] as String).toLowerCase().contains(_searchQuery.toLowerCase()) || (e['content'] as String).toLowerCase().contains(_searchQuery.toLowerCase())).toList(); }
+    result.sort((a,b)=> (a['order_index']??0).compareTo(b['order_index']??0));
+    setState(()=>_filteredEntries=result);
   }
 
-  void _openEditor({Map<String, dynamic>? entry}) {
-    final isEditing = entry != null;
-    final titleController = TextEditingController(text: isEditing ? entry['title'] : '');
-    final contentController = TextEditingController(text: isEditing ? entry['content'] : '');
-    String selectedCategory = isEditing ? entry['category'] : _writingCategories.first;
-    String selectedMood = isEditing ? entry['mood'] : _moods.first;
-    String dateStr = isEditing ? entry['date'] : DateTime.now().toIso8601String().substring(0, 10);
+  Future<void> _updateStatus(int id, String newStatus) async {
+    await DatabaseHelper.instance.updateJournalEntry(id, {'status': newStatus});
+    await _refreshEntries();
+  }
 
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => Scaffold(
-          appBar: AppBar(
-            title: Text(isEditing ? 'Edit Writing / Entry' : 'New Writing Studio Entry'),
-            actions: [
-              IconButton(
-                icon: const Icon(Icons.save),
-                onPressed: () async {
-                  final title = titleController.text.trim();
-                  final content = contentController.text.trim();
-                  if (title.isNotEmpty && content.isNotEmpty) {
-                    final row = {'title': title, 'content': content, 'category': selectedCategory, 'mood': selectedMood, 'date': dateStr};
-                    if (isEditing) {
-                      await DatabaseHelper.instance.updateJournalEntry(entry['id'], row);
-                    } else {
-                      await DatabaseHelper.instance.insertJournalEntry(row);
-                    }
-                    await _refreshEntries();
-                    if (context.mounted) Navigator.pop(context);
-                  }
-                },
-              ),
-            ],
-          ),
-          body: Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Column(
-              children: [
-                Row(
+  Future<void> _updateOrder(int id, int newOrder) async {
+    await DatabaseHelper.instance.updateJournalEntry(id, {'order_index': newOrder});
+  }
+
+  void _openEditor({Map<String, dynamic>? entry}){
+    final isEditing = entry != null;
+    final titleController = TextEditingController(text: entry?['title'] ?? '');
+    final contentController = TextEditingController(text: entry?['content'] ?? '');
+    String selectedCategory = entry?['category'] ?? _writingCategories.first;
+    String selectedMood = entry?['mood'] ?? _moods.first;
+    String selectedStatus = entry?['status'] ?? 'Idea';
+    bool isAiLoading = false;
+    String aiResult = '';
+
+    showDialog(
+      context: context,
+      builder: (context){
+        return StatefulBuilder(
+          builder: (context, setDialogState){
+            return AlertDialog(
+              title: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children:[
+                Text(isEditing?'Edit Writing':'New Writing'),
+                Row(children:[
+                  IconButton(icon: const Icon(Icons.smart_toy_outlined, size:20), tooltip: 'AERO', onPressed: ()=>_showAiDialog(contentController, setDialogState)),
+                  IconButton(icon: const Icon(Icons.category, size:20), onPressed: ()=>Navigator.pop(context)),
+                ]),
+              ]),
+              content: SizedBox(
+                width: 600,
+                height: 520,
+                child: Column(
                   children: [
-                    Expanded(
-                      flex: 2,
-                      child: DropdownButtonFormField<String>(
-                        value: selectedCategory,
-                        decoration: const InputDecoration(labelText: 'Format / Type'),
-                        items: _writingCategories.map((cat) => DropdownMenuItem(value: cat, child: Text(cat))).toList(),
-                        onChanged: (val) {
-                          if (val != null) selectedCategory = val;
-                        },
+                    Row(children:[
+                      Expanded(flex:2, child: DropdownButtonFormField<String>(value: selectedCategory, decoration: const InputDecoration(labelText: 'Format / Type'), items: _writingCategories.map((cat)=>DropdownMenuItem(value: cat, child: Text(cat))).toList(), onChanged: (val){ if(val!=null) setDialogState(()=>selectedCategory=val); })),
+                      const SizedBox(width:12),
+                      Expanded(flex:2, child: DropdownButtonFormField<String>(value: selectedMood, decoration: const InputDecoration(labelText: 'State / Mood'), items: _moods.map((m)=>DropdownMenuItem(value: m, child: Text(m))).toList(), onChanged: (val){ if(val!=null) setDialogState(()=>selectedMood=val); })),
+                    ]),
+                    const SizedBox(height:8),
+                    DropdownButtonFormField<String>(value: selectedStatus, decoration: const InputDecoration(labelText: 'Status — Kanban'), items: _statuses.map((s)=>DropdownMenuItem(value:s, child: Row(children:[Icon(WritingStatusExt.fromString(s).icon, size:16), const SizedBox(width:6), Text(s)]))).toList(), onChanged: (val){ if(val!=null) setDialogState(()=>selectedStatus=val); }),
+                    const SizedBox(height:12),
+                    TextField(controller: titleController, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold), decoration: const InputDecoration(labelText: 'Title / Chapter Name', hintText: 'Enter title...')),
+                    const SizedBox(height:12),
+                    Expanded(child: TextField(controller: contentController, maxLines: null, expands: true, textAlignVertical: TextAlignVertical.top, decoration: const InputDecoration(labelText: 'Content / Draft / Thoughts', alignLabelWithHint: true, border: OutlineInputBorder(), hintText: 'Start writing your story, article, or thoughts here...'))),
+                    if(aiResult.isNotEmpty)...[
+                      const SizedBox(height:8),
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: Colors.purple.shade50,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: Colors.purple.shade200,
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children:[
+                            Row(children:[
+                              const Icon(Icons.smart_toy, size:14),
+                              const SizedBox(width:4),
+                              const Text(
+                                'AI Suggestion',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize:11,
+                                ),
+                              ),
+                              const Spacer(),
+                              TextButton(
+                                onPressed: (){
+                                  contentController.text +=
+                                      '\n\n' + aiResult;
+                                  setDialogState(()=>aiResult='');
+                                },
+                                child: const Text(
+                                  'Insert',
+                                  style: TextStyle(fontSize:10),
+                                ),
+                              ),
+                            ]),
+                            Text(
+                              aiResult,
+                              style: const TextStyle(fontSize:11),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      flex: 2,
-                      child: DropdownButtonFormField<String>(
-                        value: selectedMood,
-                        decoration: const InputDecoration(labelText: 'State / Mood'),
-                        items: _moods.map((m) => DropdownMenuItem(value: m, child: Text(m))).toList(),
-                        onChanged: (val) {
-                          if (val != null) selectedMood = val;
-                        },
-                      ),
-                    ),
+                    ],
                   ],
                 ),
-                const SizedBox(height: 12),
-                TextField(controller: titleController, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold), decoration: const InputDecoration(labelText: 'Title / Chapter Name', hintText: 'Enter title...')),
-                const SizedBox(height: 12),
+              ),
+              actions:[
+                TextButton(onPressed: ()=>Navigator.pop(context), child: const Text('Cancel')),
+                ElevatedButton(onPressed: () async {
+                  final title = titleController.text.trim();
+                  final content = contentController.text.trim();
+                  if(title.isNotEmpty && content.isNotEmpty){
+                    final wordCount = content.split(RegExp(r'\s+')).length;
+                    final row = {'title': title, 'content': content, 'category': selectedCategory, 'mood': selectedMood, 'status': selectedStatus, 'date': DateFormat('yyyy-MM-dd').format(DateTime.now()), 'color': '#9B59B6', 'word_count': wordCount, 'order_index': _entries.length};
+                    if(isEditing){ await DatabaseHelper.instance.updateJournalEntry(entry['id'], row); } else { await DatabaseHelper.instance.insertJournalEntry(row); }
+                    await _refreshEntries();
+                    if(mounted) Navigator.pop(context);
+                  }
+                }, child: Text(isEditing?'Save':'Add')),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  void _showAiDialog(TextEditingController contentCtrl, StateSetter parentSetState){
+    final instructionCtrl = TextEditingController(text: 'Improve this writing, keep voice');
+    String aiResponse = '';
+    bool loading = false;
+    showDialog(context: context, builder: (ctx)=>StatefulBuilder(builder: (ctx, setState){
+      return AlertDialog(
+        title: const Text('Local AERO — Ollama'),
+        content: SizedBox(width: 400, height: 380, child: Column(children:[
+          TextField(controller: instructionCtrl, decoration: const InputDecoration(labelText: 'Instruction', hintText: 'Improve, Summarize, Expand, Critique...')),
+          const SizedBox(height:12),
+          Row(children:[
+            ElevatedButton(
+              onPressed: () async {
+                setState(()=>loading=true);
+                final res = await AiCopilotService.improveText(
+                  contentCtrl.text,
+                  instruction: instructionCtrl.text,
+                );
+                setState((){ aiResponse=res; loading=false; });
+              },
+              child: const Text('Run AI'),
+            ),
+            const SizedBox(width:8),
+            TextButton(
+              onPressed: () async {
+                setState(()=>loading=true);
+                final res = await AiCopilotService.summarize(
+                  contentCtrl.text,
+                );
+                setState((){ aiResponse=res; loading=false; });
+              },
+              child: const Text('Summarize'),
+            ),
+            TextButton(
+              onPressed: () async {
+                setState(()=>loading=true);
+                final res = await AiCopilotService.expand(
+                  contentCtrl.text,
+                );
+                setState((){ aiResponse=res; loading=false; });
+              },
+              child: const Text('Expand'),
+            ),
+          ]),
+          const SizedBox(height:12),
+          if(loading) const CircularProgressIndicator(),
+          if(aiResponse.isNotEmpty) Expanded(child: SingleChildScrollView(child: Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(8)), child: Text(aiResponse)))),
+        ])),
+        actions:[
+          TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text('Close')),
+          if(aiResponse.isNotEmpty) ElevatedButton(onPressed: (){ contentCtrl.text = aiResponse; Navigator.pop(ctx); parentSetState((){}); }, child: const Text('Replace Content')),
+          if(aiResponse.isNotEmpty) ElevatedButton(onPressed: (){ contentCtrl.text += '\n\n' + aiResponse; Navigator.pop(ctx); parentSetState((){}); }, child: const Text('Append')),
+        ],
+      );
+    }));
+  }
+
+  Widget _buildKanbanView(){
+    final columns = _statuses;
+    return Row(
+      children: columns.map((status){
+        final statusEntries = _filteredEntries.where((e)=>(e['status']??'Idea')==status).toList();
+        final statusEnum = WritingStatusExt.fromString(status);
+        return Expanded(
+          child: Container(
+            margin: const EdgeInsets.all(4),
+            decoration: BoxDecoration(color: statusEnum.color.withOpacity(0.2), borderRadius: BorderRadius.circular(12), border: Border.all(color: statusEnum.color)),
+            child: Column(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: statusEnum.color,
+                    borderRadius: const BorderRadius.only(
+                      topLeft: Radius.circular(11),
+                      topRight: Radius.circular(11),
+                    ),
+                  ),
+                  child: Row(children:[
+                    Icon(
+                      statusEnum.icon,
+                      size:16,
+                      color: Colors.white,
+                    ),
+                    const SizedBox(width:4),
+                    Text(
+                      status,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                        fontSize: 12,
+                      ),
+                    ),
+                    const Spacer(),
+                    Text(
+                      '${statusEntries.length}',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ]),
+                ),
                 Expanded(
-                  child: TextField(
-                    controller: contentController,
-                    maxLines: null,
-                    expands: true,
-                    textAlignVertical: TextAlignVertical.top,
-                    decoration: const InputDecoration(labelText: 'Content / Draft / Thoughts', alignLabelWithHint: true, border: OutlineInputBorder(), hintText: 'Start writing your story, article, or thoughts here...'),
+                  child: ReorderableListView.builder(
+                    itemCount: statusEntries.length,
+                    onReorder: (oldIdx, newIdx) async {
+                      if(newIdx>oldIdx) newIdx--;
+                      final moved = statusEntries[oldIdx];
+                      setState((){
+                        final all = List<Map<String,dynamic>>.from(_filteredEntries);
+                        all.removeWhere((e)=>e['id']==moved['id']);
+                        final targetIdx = all.indexWhere((e)=>(e['status']??'Idea')==status);
+                        // Simplified: just update order_index
+                      });
+                      await _updateOrder(moved['id'], newIdx);
+                      await _refreshEntries();
+                    },
+                    itemBuilder: (ctx, idx){
+                      final entry = statusEntries[idx];
+                      return Card(key: ValueKey(entry['id']), margin: const EdgeInsets.all(6), child: ListTile(
+                        dense: true,
+                        title: Text(entry['title'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12), maxLines: 2, overflow: TextOverflow.ellipsis),
+                        subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[Text('${entry['category']} • ${entry['word_count']??0}w', style: const TextStyle(fontSize: 10)), const SizedBox(height:4), LinearProgressIndicator(value: _statuses.indexOf(status)/3, color: statusEnum.color, backgroundColor: Colors.grey.shade200, minHeight: 3)]),
+                        trailing: PopupMenuButton<String>(
+                          onSelected: (v){
+                            if(v=='edit'){
+                              _openEditor(entry: entry);
+                            } else if(v!=''&&_statuses.contains(v)){
+                              _updateStatus(entry['id'], v);
+                            }
+                          },
+                          itemBuilder: (c){
+                            return [
+                              const PopupMenuItem(
+                                value: 'edit',
+                                child: Text('Edit'),
+                              ),
+                              const PopupMenuDivider(),
+                              ..._statuses.where(
+                                (s)=>s!=status
+                              ).map(
+                                (s)=>PopupMenuItem(
+                                  value:s,
+                                  child: Text('Move to $s'),
+                                ),
+                              ),
+                            ];
+                          },
+                        ),
+                        onTap: ()=>_openEditor(entry: entry),
+                      ));
+                    },
                   ),
                 ),
               ],
             ),
           ),
-        ),
-      ),
+        );
+      }).toList(),
     );
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context){
     return Scaffold(
       appBar: AppBar(
         title: const Text('Writing Hub & Micro-Journal'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.file_download),
-            tooltip: 'Export Writing Hub JSON',
-            onPressed: () => ExportService.exportJournalJson(_filteredEntries),
-          ),
+          IconButton(icon: Icon(_isKanbanView?Icons.view_list:Icons.view_kanban), tooltip: _isKanbanView?'List View':'Kanban Board', onPressed: ()=>setState(()=>_isKanbanView=!_isKanbanView)),
+          IconButton(icon: const Icon(Icons.file_download), tooltip: 'Export JSON', onPressed: ()=>ExportService.exportJournalJson(_filteredEntries)),
+          PopupMenuButton<String>(onSelected: (v){ if(v=='pdf') WeeklyReviewService.shareWeeklyPdf(); }, itemBuilder: (c)=>[const PopupMenuItem(value: 'pdf', child: Text('Weekly PDF Review'))]),
         ],
       ),
       body: Column(
         children: [
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: TextField(
-              controller: _searchController,
-              decoration: InputDecoration(hintText: 'Search by title, content, mood...', prefixIcon: const Icon(Icons.search), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)), isDense: true),
-              onChanged: (v) {
-                _searchQuery = v;
-                _applyFilters();
-              },
-            ),
+            child: TextField(controller: _searchController, decoration: InputDecoration(hintText: 'Search by title, content, mood...', prefixIcon: const Icon(Icons.search), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)), isDense: true), onChanged: (v){ _searchQuery=v; _applyFilters(); }),
           ),
-          SizedBox(
-            height: 60,
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              children: [
-                Padding(
-                  padding: const EdgeInsets.only(right: 8.0),
-                  child: ChoiceChip(label: const Text('All'), selected: _selectedFilter == 'All', onSelected: (selected) { setState(() => _selectedFilter = 'All'); _applyFilters(); }),
-                ),
-                ..._writingCategories.map((cat) {
-                  return Padding(
-                    padding: const EdgeInsets.only(right: 8.0),
-                    child: ChoiceChip(
-                      label: Text(cat),
-                      selected: _selectedFilter == cat,
-                      onSelected: (selected) {
-                        setState(() => _selectedFilter = cat);
-                        _applyFilters();
-                      },
-                    ),
-                  );
-                }),
-              ],
-            ),
-          ),
-          const Divider(height: 1),
-          Expanded(
-            child: _filteredEntries.isEmpty
-                ? const Center(child: Text('No writings or journal entries found. Tap + to start drafting.'))
-                : ListView.builder(
-                    itemCount: _filteredEntries.length,
-                    itemBuilder: (context, index) {
-                      final entry = _filteredEntries[index];
-                      return Card(
-                        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                        child: ListTile(
-                          title: Text(entry['title'], style: const TextStyle(fontWeight: FontWeight.bold)),
-                          subtitle: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const SizedBox(height: 4),
-                              Text(entry['content'], maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(color: Colors.grey.shade700)),
-                              const SizedBox(height: 6),
-                              Row(
-                                children: [
-                                  Chip(label: Text(entry['category'], style: const TextStyle(fontSize: 10)), visualDensity: VisualDensity.compact, padding: EdgeInsets.zero),
-                                  const SizedBox(width: 8),
-                                  Text('${entry['mood']} • ${entry['date']}', style: const TextStyle(fontSize: 11, color: Colors.grey)),
-                                ],
-                              ),
-                            ],
-                          ),
-                          isThreeLine: true,
-                          onTap: () => _openEditor(entry: entry),
-                          trailing: IconButton(icon: const Icon(Icons.delete, color: Colors.red), onPressed: () async { await DatabaseHelper.instance.deleteJournalEntry(entry['id']); await _refreshEntries(); }),
-                        ),
-                      );
-                    },
+          SizedBox(height: 60, child: ListView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8), children:[
+            Padding(padding: const EdgeInsets.only(right:8), child: ChoiceChip(label: const Text('All Categories'), selected: _selectedFilter=='All', onSelected: (s){ setState(()=>_selectedFilter='All'); _applyFilters(); })),
+            ..._writingCategories.map((cat)=>Padding(padding: const EdgeInsets.only(right:8), child: ChoiceChip(label: Text(cat), selected: _selectedFilter==cat, onSelected: (s){ setState(()=>_selectedFilter=cat); _applyFilters(); }))),
+          ])),
+          SizedBox(height: 50, child: ListView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 12), children:[
+            Padding(padding: const EdgeInsets.only(right:8), child: ChoiceChip(label: const Text('All Status'), selected: _selectedStatusFilter=='All', onSelected: (s){ setState(()=>_selectedStatusFilter='All'); _applyFilters(); })),
+            ..._statuses.map((st){
+              final enumVal = WritingStatusExt.fromString(st);
+              return Padding(
+                padding: const EdgeInsets.only(right:8),
+                child: ChoiceChip(
+                  label: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children:[
+                      Icon(enumVal.icon, size:14),
+                      const SizedBox(width:4),
+                      Text(st),
+                    ],
                   ),
-          ),
+                  selected: _selectedStatusFilter==st,
+                  onSelected: (s){
+                    setState(()=>_selectedStatusFilter=st);
+                    _applyFilters();
+                  },
+                  selectedColor: enumVal.color.withOpacity(0.3),
+                ),
+              );
+            }),
+          ])),
+          const Divider(height:1),
+          Expanded(child: _isKanbanView ? _buildKanbanView() : _filteredEntries.isEmpty ? const Center(child: Text('No writings found. Tap + to start. Switch to Kanban via top icon.')) : ListView.builder(itemCount: _filteredEntries.length, itemBuilder: (ctx, idx){
+            final entry = _filteredEntries[idx];
+            final status = entry['status']??'Idea';
+            final statusEnum = WritingStatusExt.fromString(status);
+            return Card(margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6), child: ListTile(
+              leading: Container(width: 8, height: 40, decoration: BoxDecoration(color: statusEnum.color, borderRadius: BorderRadius.circular(4))),
+              title: Text(entry['title'], style: const TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[
+                const SizedBox(height:4),
+                Text(entry['content'], maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(color: Colors.grey.shade700, fontSize: 12)),
+                const SizedBox(height:6),
+                Row(children:[
+                  Chip(label: Text(entry['category'], style: const TextStyle(fontSize: 10)), visualDensity: VisualDensity.compact, padding: EdgeInsets.zero),
+                  const SizedBox(width:6),
+                  Chip(label: Text(status, style: const TextStyle(fontSize: 10)), backgroundColor: statusEnum.color.withOpacity(0.3), visualDensity: VisualDensity.compact, avatar: Icon(statusEnum.icon, size:12)),
+                  const SizedBox(width:6),
+                  Text('${entry['mood']} • ${entry['date']} • ${entry['word_count']??0}w', style: const TextStyle(fontSize: 10, color: Colors.grey)),
+                ]),
+              ]),
+              isThreeLine: true,
+              onTap: ()=>_openEditor(entry: entry),
+              trailing: Row(mainAxisSize: MainAxisSize.min, children:[
+                IconButton(icon: const Icon(Icons.smart_toy_outlined, size:18), tooltip: 'AERO', onPressed: (){ _openEditor(entry: entry); }),
+                IconButton(icon: const Icon(Icons.delete, color: Colors.red, size:18), onPressed: () async { await DatabaseHelper.instance.deleteJournalEntry(entry['id']); await _refreshEntries(); }),
+              ]),
+            ));
+          })),
         ],
       ),
-      floatingActionButton: FloatingActionButton(onPressed: () => _openEditor(), child: const Icon(Icons.add)),
+      floatingActionButton: FloatingActionButton(onPressed: ()=>_openEditor(), child: const Icon(Icons.add)),
     );
   }
 }
+
+
+// ==================== 6. AI CHAT TAB — Local Ollama Chat Space ====================
+class AiChatTab extends StatefulWidget {
+  const AiChatTab({super.key});
+  @override
+  State<AiChatTab> createState() => _AiChatTabState();
+}
+
+class _AiChatTabState extends State<AiChatTab> {
+  final List<Map<String,String>> _messages = [];
+  final TextEditingController _inputCtrl = TextEditingController();
+  bool _isLoading = false;
+  bool? _online;
+  final ScrollController _scrollCtrl = ScrollController();
+
+  @override
+  void initState(){
+    super.initState();
+    _checkOnline();
+    _messages.add({
+      'role': 'assistant',
+      'text': 'Hi Caleb — I\'m your local Onyx Beacon AERO (Ollama). '
+      'Zero cloud, zero fees. Ask me to improve writing, summarize your week, '
+      'analyze habits, or brainstorm.\n\n'
+      'Try: \"Summarize my last 7 days\" or \"Help me expand chapter 2\"'
+    });
+  }
+
+  Future<void> _checkOnline() async {
+    final ok = await AiCopilotService.checkConnection();
+    setState(()=>_online=ok);
+  }
+
+  Future<void> _showAeroSettings() async {
+    final urlCtrl = TextEditingController(text: AiCopilotService.baseUrl);
+    final modelCtrl = TextEditingController(text: AiCopilotService.model);
+    showDialog(context: context, builder: (ctx)=>AlertDialog(
+      title: const Text('AERO Settings — Local Offline'),
+      content: Column(mainAxisSize: MainAxisSize.min, children:[
+        const Text(
+          'Windows: http://localhost:11434 — '
+          'iPhone same Wi-Fi: http://192.168.1.15:11434 '
+          '(your Windows IP). Zero cloud, zero fees.',
+          style: TextStyle(fontSize:11),
+        ),
+        const SizedBox(height:12),
+        TextField(controller: urlCtrl, decoration: const InputDecoration(labelText: 'AERO URL', hintText: 'http://192.168.1.15:11434', border: OutlineInputBorder())),
+        const SizedBox(height:8),
+        TextField(controller: modelCtrl, decoration: const InputDecoration(labelText: 'Model', hintText: 'llama3', border: OutlineInputBorder())),
+      ]),
+      actions:[
+        TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text('Cancel')),
+        ElevatedButton(onPressed: (){ AiCopilotService.setCustomEndpoint(urlCtrl.text.trim(), modelCtrl.text.trim()); Navigator.pop(ctx); _checkOnline(); }, child: const Text('Save & Test')),
+      ],
+    ));
+  }
+
+  Future<void> _sendMessage() async {
+    final text = _inputCtrl.text.trim();
+    if(text.isEmpty || _isLoading) return;
+    setState((){
+      _messages.add({'role':'user','text':text});
+      _isLoading = true;
+      _inputCtrl.clear();
+    });
+    _scrollToBottom();
+    try {
+      // Gather context: last 7 days data for smarter answers
+      String contextPrompt = text;
+      if(text.toLowerCase().contains('week') || text.toLowerCase().contains('summary') || text.toLowerCase().contains('habit')){
+        try {
+          final db = await DatabaseHelper.instance.database;
+          final weekAgo = DateFormat('yyyy-MM-dd').format(DateTime.now().subtract(const Duration(days: 7)));
+          final completions = await db.query('habit_completions', where: 'completed_date >= ?', whereArgs: [weekAgo]);
+          final txs = await db.query('transactions', where: 'date >= ?', whereArgs: [weekAgo]);
+          final journals = await db.query('journal_entries', where: 'date >= ?', whereArgs: [weekAgo]);
+          double net = 0;
+          for(var t in txs){ final amt=(t['amount'] as num).toDouble(); net+=t['type']=='Income'?amt:-amt; }
+          contextPrompt = 'Context — Last 7 days: ${completions.length} habit completions, ${txs.length} transactions net \$${net.toStringAsFixed(0)}, ${journals.length} writing entries.\n\nUser question: $text\n\nAnswer concisely, helpful, local-first.';
+        } catch(_){}
+      }
+      final response = await AiCopilotService.improveText(contextPrompt, instruction: 'You are Onyx Beacon AERO, local-first, helpful, concise. Answer the user question directly.');
+      setState((){
+        _messages.add({'role':'assistant','text':response});
+        _isLoading = false;
+      });
+    } catch(e){
+      setState((){
+        _messages.add({'role':'assistant','text':'Error: $e\n\nCheck Ollama is running: ollama run llama3'});
+        _isLoading = false;
+      });
+    }
+    _scrollToBottom();
+  }
+
+  void _scrollToBottom(){
+    WidgetsBinding.instance.addPostFrameCallback((_){
+      if(_scrollCtrl.hasClients){
+        _scrollCtrl.animateTo(_scrollCtrl.position.maxScrollExtent + 120, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context){
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('AI Chat — AERO'),
+        actions: [
+          IconButton(icon: Icon(_online==true?Icons.circle:Icons.circle_outlined, color: _online==true?Colors.green:Colors.grey, size:12), tooltip: _online==true?'Online':'Offline', onPressed: _checkOnline),
+          IconButton(icon: const Icon(Icons.settings), onPressed: _showAeroSettings),
+          IconButton(icon: const Icon(Icons.refresh), onPressed: _checkOnline),
+          PopupMenuButton<String>(onSelected: (v){ if(v=='clear') setState(()=>_messages.clear()); }, itemBuilder: (c)=>[const PopupMenuItem(value:'clear', child: Text('Clear Chat'))]),
+        ],
+      ),
+      body: Column(
+        children: [
+          if(_online==false)
+            Container(
+              color: Colors.orange.shade100,
+              padding: const EdgeInsets.all(8),
+              child: Row(children:[
+                const Icon(Icons.warning_amber, size:16),
+                const SizedBox(width:6),
+                const Expanded(
+                  child: Text(
+                    'AERO offline — Windows: ollama run llama3. '
+                    'iPhone: set to http://192.168.1.15:11434 '
+                    '(same Wi-Fi, zero cloud).',
+                    style: TextStyle(fontSize:11),
+                  ),
+                ),
+                TextButton(
+                  onPressed: _checkOnline,
+                  child: const Text('Retry'),
+                ),
+              ]),
+            ),
+          Expanded(
+            child: ListView.builder(
+              controller: _scrollCtrl,
+              padding: const EdgeInsets.all(12),
+              itemCount: _messages.length + (_isLoading?1:0),
+              itemBuilder: (ctx, idx){
+                if(idx==_messages.length && _isLoading){
+                  return const Padding(padding: EdgeInsets.all(8), child: Row(children:[SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2)), SizedBox(width:8), Text('Thinking...', style: TextStyle(fontSize:12, color: Colors.grey))]));
+                }
+                final msg = _messages[idx];
+                final isUser = msg['role']=='user';
+                return Align(
+                  alignment: isUser?Alignment.centerRight:Alignment.centerLeft,
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(vertical:4),
+                    padding: const EdgeInsets.all(12),
+                    constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width*0.8),
+                    decoration: BoxDecoration(
+                      color: isUser?Colors.blue.shade600:Colors.grey.shade200,
+                      borderRadius: BorderRadius.only(
+                        topLeft: const Radius.circular(16),
+                        topRight: const Radius.circular(16),
+                        bottomLeft: Radius.circular(isUser?16:4),
+                        bottomRight: Radius.circular(isUser?4:16),
+                      ),
+                    ),
+                    child: Text(msg['text']??'', style: TextStyle(color: isUser?Colors.white:Colors.black87, fontSize:13)),
+                  ),
+                );
+              },
+            ),
+          ),
+          const Divider(height:1),
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _inputCtrl,
+                    minLines:1,
+                    maxLines:4,
+                    decoration: InputDecoration(
+                      hintText: 'Ask AI — summarize week, improve writing, brainstorm...',
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(24)),
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(horizontal:16, vertical:10),
+                    ),
+                    onSubmitted: (_)=>_sendMessage(),
+                  ),
+                ),
+                const SizedBox(width:8),
+                CircleAvatar(
+                  backgroundColor: Colors.blue,
+                  child: IconButton(icon: const Icon(Icons.send, color: Colors.white, size:18), onPressed: _sendMessage),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
