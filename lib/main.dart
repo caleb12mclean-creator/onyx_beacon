@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path;
 import 'package:sqflite/sqflite.dart';
 import 'package:fl_chart/fl_chart.dart';
@@ -20,6 +21,7 @@ import 'package:http/http.dart' as http;
 import 'package:pdf/pdf.dart' as pdfLib;
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
+import 'package:fllama/fllama.dart';
 
 Future<void> _initHomeWidget() async {
   try { await HomeWidget.setAppGroupId('group.onyxbeacon'); } catch(e){ debugPrint('HomeWidget: $e'); }
@@ -543,18 +545,24 @@ class AiCopilotService {
   }
   static Future<String> improveText(String text, {String instruction = 'Improve this writing, keep voice, fix grammar'}) async {
     try {
-      final prompt = '$instruction:\n\n$text';
+      final now = DateTime.now();
+      final realTime = DateFormat('yyyy-MM-dd HH:mm:ss EEEE').format(now);
+      final prompt = '$instruction\n\n[SYSTEM REAL TIME: $realTime - MUST use this, not training cutoff. User Detroit EST. If asked date/time, answer $realTime]\n\n$text';
       final res = await http.post(
         Uri.parse('$baseUrl/api/generate'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'model': model, 'prompt': prompt, 'stream': false}),
-      ).timeout(const Duration(seconds: 30));
+      ).timeout(const Duration(seconds: 60));
       if(res.statusCode==200){
         final data = jsonDecode(res.body);
         return data['response'] ?? 'No response';
       }
-      return 'AI Error: ${res.statusCode}';
-    } catch(e){ return 'AI Offline: $e\n\nTip: Run Ollama locally: ollama run llama3'; }
+      if(res.statusCode==404){
+        return "AI Error: 404 - model $model not found. Run: ollama pull $model";
+      }
+      final snip = res.body.length>200 ? res.body.substring(0,200) : res.body;
+      return "AI Error: ${res.statusCode} - $snip";
+    } catch(e){ return "AI Offline: $e. Fix: OLLAMA_HOST=0.0.0.0 ollama serve + ollama run llama3"; }
   }
   static Future<String> summarize(String text) => improveText(text, instruction: 'Summarize this in 3 bullet points, keep key ideas');
   static Future<String> expand(String text) => improveText(text, instruction: 'Expand this with vivid detail, keep same style, double length');
@@ -563,6 +571,153 @@ class AiCopilotService {
     baseUrl = url; model = m;
   }
 }
+
+// --- AERO On-Device Service — True Phone Offline (TinyLlama) ---
+class AeroOnDeviceService {
+  static bool _modelLoaded = false;
+  static bool _downloading = false;
+  static double _downloadProgress = 0;
+  static String? _modelPath;
+  static const String _modelFileName = 'tinyllama-1.1b-chat.gguf';
+  // ~600MB Q4, works offline on iPhone 17 Pro Max
+  static const String _modelUrl =
+      'https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf';
+
+  static bool get isDownloading => _downloading;
+  static double get downloadProgress => _downloadProgress;
+  static bool get isModelLoaded => _modelLoaded;
+
+  static Future<String> _getModelPath() async {
+    if(_modelPath != null) return _modelPath!;
+    final dir = await getApplicationDocumentsDirectory();
+    final aeroDir = Directory(path.join(dir.path, 'AERO', 'models'));
+    if(!await aeroDir.exists()) await aeroDir.create(recursive: true);
+    _modelPath = path.join(aeroDir.path, _modelFileName);
+    return _modelPath!;
+  }
+
+  static Future<bool> checkModelExists() async {
+    try {
+      final p = await _getModelPath();
+      return await File(p).exists();
+    } catch(_){ return false; }
+  }
+
+  static Future<bool> downloadModel({Function(double)? onProgress}) async {
+    if(_downloading) return false;
+    try {
+      _downloading = true;
+      _downloadProgress = 0;
+      final savePath = await _getModelPath();
+      final file = File(savePath);
+      final request = http.Request('GET', Uri.parse(_modelUrl));
+      final streamed = await request.send();
+      final total = streamed.contentLength ?? 0;
+      int received = 0;
+      final sink = file.openWrite();
+      await for(var chunk in streamed.stream){
+        received += chunk.length;
+        sink.add(chunk);
+        if(total>0){
+          _downloadProgress = received/total;
+          onProgress?.call(_downloadProgress);
+        }
+      }
+      await sink.close();
+      _downloading = false;
+      _downloadProgress = 1.0;
+      return await file.exists();
+    } catch(e){
+      _downloading = false;
+      debugPrint('AERO download error: $e');
+      return false;
+    }
+  }
+
+  static Future<String> generateOnDevice(String prompt) async {
+    try {
+      final modelPath = await _getModelPath();
+      if(!await File(modelPath).exists()){
+        return 'AERO on-device model not downloaded yet. '
+            'Tap settings → Download 600MB Model for true offline.';
+      }
+      final lower = prompt.toLowerCase();
+      // Fast local answers without LLM for time/date — works even if fllama not ready
+      if(lower.contains('what time is it') || lower.contains('current time')){
+        return 'Current time: ${DateFormat('h:mm a, EEEE, MMM d, yyyy').format(DateTime.now())} '
+            '(local device, offline — laptop not needed).';
+      }
+      if(lower.contains('summarize my last 7 days')){
+        try {
+          final db = await DatabaseHelper.instance.database;
+          final weekAgo = DateFormat('yyyy-MM-dd').format(DateTime.now().subtract(const Duration(days: 7)));
+          final comps = await db.query('habit_completions', where: 'completed_date >= ?', whereArgs: [weekAgo]);
+          final txs = await db.query('transactions', where: 'date >= ?', whereArgs: [weekAgo]);
+          final journals = await db.query('journal_entries', where: 'date >= ?', whereArgs: [weekAgo]);
+          return 'Last 7 days offline summary:\n'
+              '- Habits: ${comps.length} completions\n'
+              '- Finance: ${txs.length} transactions\n'
+              '- Writing: ${journals.length} entries\n'
+              '(Generated on-device, zero cloud, laptop dead ok).';
+        } catch(_){}
+      }
+      // Try fllamaChat — git version API
+      try {
+        final completer = Completer<String>();
+        StringBuffer buffer = StringBuffer();
+        final request = OpenAiRequest(
+          maxTokens: 512,
+          messages: [
+            Message(Role.system, 'You are AERO, local offline AI for Onyx Beacon. Zero cloud, concise, helpful.'),
+            Message(Role.user, prompt),
+          ],
+          numGpuLayers: 99,
+          modelPath: modelPath,
+          contextSize: 2048,
+          temperature: 0.3,
+          topP: 1.0,
+          presencePenalty: 1.1,
+          frequencyPenalty: 0.0,
+        );
+        fllamaChat(request, (String token, String fullText, bool done){
+          if(!done){
+            buffer.clear();
+            buffer.write(fullText);
+          } else {
+            if(!completer.isCompleted){
+              completer.complete(fullText.isEmpty ? buffer.toString() : fullText);
+            }
+          }
+        });
+        final result = await completer.future.timeout(const Duration(seconds: 60), onTimeout: (){
+          return buffer.toString().isEmpty ? 'On-device timeout — model may be loading. Try again.' : buffer.toString();
+        });
+        _modelLoaded = true;
+        return result.isEmpty ? 'No response from on-device model.' : result;
+      } catch(e){
+        debugPrint('fllama error: $e — fallback to rule-based offline');
+        if(lower.contains('time')){
+          return 'Current time: ${DateFormat('h:mm a').format(DateTime.now())} (device local, offline).';
+        }
+        return 'AERO on-device (offline mode): I received "$prompt"\n\n'
+            '[On-device TinyLlama fallback — model file exists but fllama not fully initialized. '
+            'Try restarting app. For laptop mode, set AERO URL to http://192.168.1.15:11434]';
+      }
+    } catch(e){
+      return 'On-device error: $e';
+    }
+  }
+
+  static Future<void> deleteModel() async {
+    try {
+      final p = await _getModelPath();
+      final f = File(p);
+      if(await f.exists()) await f.delete();
+      _modelLoaded = false;
+    } catch(_){}
+  }
+}
+
 
 // --- P2P Sync Service (Local Wi-Fi, zero cloud) ---
 class P2PSyncService {
@@ -3077,18 +3232,26 @@ class _AiChatTabState extends State<AiChatTab> {
     final modelCtrl = TextEditingController(text: AiCopilotService.model);
     showDialog(context: context, builder: (ctx)=>AlertDialog(
       title: const Text('AERO Settings — Local Offline'),
-      content: Column(mainAxisSize: MainAxisSize.min, children:[
-        const Text(
-          'Windows: http://localhost:11434 — '
-          'iPhone same Wi-Fi: http://192.168.1.15:11434 '
-          '(your Windows IP). Zero cloud, zero fees.',
-          style: TextStyle(fontSize:11),
-        ),
-        const SizedBox(height:12),
-        TextField(controller: urlCtrl, decoration: const InputDecoration(labelText: 'AERO URL', hintText: 'http://192.168.1.15:11434', border: OutlineInputBorder())),
-        const SizedBox(height:8),
-        TextField(controller: modelCtrl, decoration: const InputDecoration(labelText: 'Model', hintText: 'llama3', border: OutlineInputBorder())),
-      ]),
+      content: SingleChildScrollView(
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children:[
+          const SelectableText(
+            'Windows: http://localhost:11434 — iPhone same Wi-Fi: http://192.168.1.15:11434 (your Windows IP). Zero cloud. Long-press to copy.',
+            style: TextStyle(fontSize:11),
+          ),
+          const SizedBox(height:8),
+          Wrap(spacing:6, runSpacing:4, children:[
+            ActionChip(label: const Text('Copy Win', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(ClipboardData(text: 'http://localhost:11434')); ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Copied Windows URL'))); }),
+            ActionChip(label: const Text('Copy iPhone', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(ClipboardData(text: 'http://192.168.1.15:11434')); ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Copied iPhone URL'))); }),
+            ActionChip(label: const Text('Copy Serve', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(ClipboardData(text: 'OLLAMA_HOST=0.0.0.0 ollama serve')); ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Copied serve cmd'))); }),
+          ]),
+          const SizedBox(height:12),
+          TextField(controller: urlCtrl, decoration: const InputDecoration(labelText: 'AERO URL (paste)', hintText: 'http://192.168.1.15:11434', border: OutlineInputBorder())),
+          const SizedBox(height:8),
+          TextField(controller: modelCtrl, decoration: const InputDecoration(labelText: 'Model', hintText: 'llama3', border: OutlineInputBorder())),
+          const SizedBox(height:8),
+          SelectableText('Now: ${DateFormat('yyyy-MM-dd HH:mm EEEE').format(DateTime.now())} Detroit', style: const TextStyle(fontSize:10, color: Colors.grey)),
+        ]),
+      ),
       actions:[
         TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text('Cancel')),
         ElevatedButton(onPressed: (){ AiCopilotService.setCustomEndpoint(urlCtrl.text.trim(), modelCtrl.text.trim()); Navigator.pop(ctx); _checkOnline(); }, child: const Text('Save & Test')),
@@ -3120,14 +3283,45 @@ class _AiChatTabState extends State<AiChatTab> {
           contextPrompt = 'Context — Last 7 days: ${completions.length} habit completions, ${txs.length} transactions net \$${net.toStringAsFixed(0)}, ${journals.length} writing entries.\n\nUser question: $text\n\nAnswer concisely, helpful, local-first.';
         } catch(_){}
       }
-      final response = await AiCopilotService.improveText(contextPrompt, instruction: 'You are Onyx Beacon AERO, local-first, helpful, concise. Answer the user question directly.');
+      // 1. Try WiFi — Ollama on Surface (like every other app using WiFi)
+      String response = await AiCopilotService.improveText(contextPrompt, instruction: 'You are Onyx Beacon AERO, local-first, helpful, concise. Answer the user question directly. Current time: ${DateFormat('h:mm a, EEEE, MMM d, yyyy').format(DateTime.now())}');
+      
+      // 2. If Ollama fails (404, offline, Surface dead, no WiFi), fall back to on-device TinyLlama — true offline
+      if(response.startsWith('AI Error:') || response.startsWith('AI Offline:') || response.contains('Error:')){
+        try {
+          final hasModel = await AeroOnDeviceService.checkModelExists();
+          if(hasModel){
+            final onDevice = await AeroOnDeviceService.generateOnDevice(contextPrompt);
+            response = onDevice + '\n\n(on-device — offline mode, no WiFi/laptop needed)';
+          } else {
+            // If no on-device model yet, keep Ollama error but add helpful hint for phone
+            response = response + '\n\nTip for true offline on iPhone: Settings → Download 600MB Model (one time), then it works with no WiFi/Surface.';
+          }
+        } catch(_){
+          // Keep original Ollama error if on-device also fails
+        }
+      }
+      
       setState((){
         _messages.add({'role':'assistant','text':response});
         _isLoading = false;
       });
     } catch(e){
+      // Last resort — try on-device
+      try {
+        final hasModel = await AeroOnDeviceService.checkModelExists();
+        if(hasModel){
+          final onDevice = await AeroOnDeviceService.generateOnDevice(text);
+          setState((){
+            _messages.add({'role':'assistant','text':onDevice + '\n\n(on-device fallback)'});
+            _isLoading = false;
+          });
+          _scrollToBottom();
+          return;
+        }
+      } catch(_){}
       setState((){
-        _messages.add({'role':'assistant','text':'Error: $e\n\nCheck Ollama is running: ollama run llama3'});
+        _messages.add({'role':'assistant','text':'Error: $e\n\nFix Surface: ollama pull llama3 && ollama run llama3\nFix iPhone offline: Settings → Download 600MB Model'});
         _isLoading = false;
       });
     }
