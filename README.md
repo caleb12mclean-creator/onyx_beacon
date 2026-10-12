@@ -1,167 +1,165 @@
 # Onyx Beacon — Life Command Center
 
-**PUSH 3.0 FINAL Interactive — 2191 lines — FREE Tap-to-Act Widgets — Buildable**
-**Home:** Detroit, MI | **Device:** iPhone 17 Pro Max + Windows ARM64 | **Status:** ✅ Works (FINAL3_FIXED)
-
-Your life's command center. Habits, Tasks, Finance, Writing Hub — encrypted, local, interactive.
-
----
-
-## ✅ PUSH 3.0 FINAL (2191 lines) — What Changed
-
-### FIXED2 vs FINAL2 — Difference
-
-| | FIXED2 (1986 lines) | FINAL2 Interactive (2191 lines) — CURRENT |
-|---|---|---|
-| **Daily Briefing** | Static numbers only | **Tappable: Tap to act** |
-| Habits Due tap | ❌ | ✅ Dialog with due habits + color dot → Tap check → `toggleHabitCompletion()` → SnackBar 🔥 |
-| Tasks tap | ❌ | ✅ Dialog with pending tasks → Tap check → `updateTaskCompletion()` → SnackBar |
-| Net Today tap | ❌ | ✅ Jumps to Finance tab via `setTab(3)` |
-| InkWell count | 0 | 3 |
-| dueHabits/pendingTasks | ❌ | ✅ Lists in state |
-| Build error | None | Fixed GEE892CD5 `& NAVIGATION` duplicate header at line 759 |
-| Brace | 0 | **0** |
-| Duplicates | 1 state | **1 state — No duplicate** |
-
-**FIXED2:** Shows `3 Habits Due`, `5 Tasks`, `$42` — refresh only.
-**FINAL2:** Tap `3` → see which 3 habits → complete one without leaving dashboard.
+**Version:** 1.0.0+7 (2026-10-12)  
+**Device:** iPhone 17 Pro Max (2026) — planning iPhone 18 Pro Max upgrade  
+**Focus:** Real AI for personal projects + lifestyle, faith, VPN-friendly, $99/yr Apple Developer next iteration
 
 ---
 
-### Features (All Free, No $99, No Mac)
+## PUSH 4 — Copiable AERO + Accurate Time + Xfinity Fix
 
-#### 1. Screenshot Fixes (from your circled screenshot)
-- Title: `Onyx Beacon — Command Center` — FittedBox so no `...` on iPhone 17 Pro Max 390px
-- Greeting: `Welcome back, Caleb.` — not Commander
-- Search: `Global search: habits, tasks, finance, writing...` — full visible
-- Nav: `Finances` + `Writing Hub` — fontSize 11, height 72, icon 22 — 5 items fit no wrap
-- Fix: Split long `Row(children:[Container,SizedBox,Expanded])` into multi-lines — fixes `G297C951C col 856`
+This push fixes the build you hit and makes phone actually usable with Xfinity.
 
-#### 2. Color Codes — 15 Colors
-```dart
-#FF6B6B #4ECDC4 #45B7D1 #96CEB4 #FFEAA7 #DDA0DD #98D8C8 #F7DC6F #BB8FCE #85C1E2 #F8B500 #6C5CE7 #A29BFE #FD79A8 #FDCB6E
-```
-DB v6: `color TEXT DEFAULT '#FF6B6B'` auto-migration. Dot shown in Habits tab + briefing dialog.
+**Build:**
+- Added `import 'package:flutter/services.dart';` → fixes `Clipboard isn't defined` at 3254
+- `const ClipboardData` → `ClipboardData` → fixes `Not a constant expression`
+- `Text` → `SelectableText` — long-press to copy URLs
 
-#### 3. Encrypted Backup (.enc) — AES-256
-Dashboard → Encrypted Backup (.enc) → Encrypt → password → SHA256 → AES CBC → `onyx_beacon_ENCRYPTED_*.enc` → share via `share_plus`
-Decrypt: `ExportService.importEncryptedBackup()`
+**Accurate time:**
+- Now injects `2026-10-12 HH:mm EEEE Detroit EST` into every AI prompt
+- Fixes `March 18 2023` hallucination you saw for `date?` / `what time is it?`
 
-#### 4. System Tray + Auto-Start (Windows)
-`window_manager` 1280x800 centered, `system_tray` icon `app_icon.ico`, menu Show/Daily Briefing/Quit, `launch_at_startup` toggle (hide to tray + power icon). Try/catch so mobile still works.
-
-#### 5. Interactive Daily Briefing — FREE Widget (This PUSH)
-Top of Command Dashboard. Code:
-
-```dart
-class DailyBriefingWidget extends StatefulWidget {
-  final Function(int)? onNavigateToTab; // For Finance/Tasks jump
-}
-class _DailyBriefingWidgetState {
-  List<Map> dueHabits, pendingTasks; // Due today
-  void _showDueHabitsDialog() // InkWell tap → ListTile + check button → toggleHabitCompletion
-  void _showPendingTasksDialog() // InkWell tap → ListTile + check → updateTaskCompletion
-}
-
-// In Dashboard:
-DailyBriefingWidget(onNavigateToTab: (idx) => shell.setTab(idx))
-```
-
-**Why FREE?** Internal widget, no App Groups needed. Real iOS home screen widgets need App Groups ($99).
-
-#### 6. iPhone 17 Pro Max OS Widget Prep (For PUSH 4)
-- `home_widget: ^0.8.1` → `setAppGroupId('group.onyxbeacon')`
-- Flutter saves `habits_due`, `tasks_pending`, `net_today`, `last_updated`
-- Swift file already pushed: `ios/OnyxBeaconWidgets/OnyxBeaconWidgets.swift` (212 lines) — reads App Group, Small/Medium/Large
-- Waiting for Mac mini + $99 to build
+**Current build:** `lib/main.dart` 3477 lines, `pubspec.yaml` 1.0.0+7 with `fllama` git main.
 
 ---
 
-## 📱 Install — PUSH 3.0 FINAL3_FIXED (2191 lines)
+## iPhone 17 Pro Max 2026 — Real Instructions (Xfinity VPN)
 
-### Windows — Works Now
+You had: **Xfinity VPN, Type Xfinity, Server 127.0.0.1:9339, Connect On Demand ON**
+
+That's Xfinity Advanced Security local proxy — not a normal VPN. Generic "Allow LAN" toggles don't work. That is why you got `AI Offline: TimeoutException after 0:01:00` and why the old in-app instructions didn't work.
+
+**Fix A — Surface Llama3 (when you want big brain):**
+1. iPhone Settings → VPN → Xfinity VPN → turn **Connect On Demand OFF** (yours is ON in screenshot)
+2. Then manually turn Xfinity VPN OFF, or Xfinity app → Internet → Advanced Security → OFF (deletes 127.0.0.1:9339 profile)
+3. Surface: `ipconfig` → note Wi-Fi IPv4 (not always 192.168.1.15, it changes)
+4. Onyx → AI Chat → gear → AERO URL = `http://YOUR_SURFACE_IP:11434` → Save & Test
+5. Surface PowerShell: `$env:OLLAMA_HOST="0.0.0.0"; ollama serve` + `ollama run llama3`
+
+**Fix B — Real AI for faith + projects WITH Xfinity VPN ON (recommended for daily):**
+1. AI Chat → gear → you now see **ON-DEVICE REAL AI (VPN-friendly, offline Bible)** — this was missing in old builds
+2. Tap **Download 600MB Model** — progress bar — ~2 min
+3. After `✅ Model downloaded`, ask anything with VPN ON: `Explain Romans 8:28 Greek` or `Bible plan for anxiety` or `personal project plan for cybersecurity paper` — returns `[on-device real AI - VPN-friendly]`, no Surface, no WiFi needed
+
+If you don't see Download button, you're on pre-3477 build — replace `lib/main.dart` with latest from this repo.
+
+---
+
+## Faith + Personal Projects + Lifestyle — Real AI
+
+You said: thinking small vs real AI for BIBLE and lifestyle. This push makes chat Bible-aware.
+
+**Auto-detects:** `bible`, `verse`, `scripture`, `psalm`, `romans`, `genesis`, `jesus`, `god`, `faith`, `prayer`
+
+**System prompt:** `You are Onyx Beacon AERO Bible Scholar + Life Coach. Deep Bible knowledge, cross-references, Greek/Hebrew when helpful, practical Detroit lifestyle application. Real time 2026-10-12`
+
+**Examples that work offline after download:**
+- `Bible plan for anxiety` → 7-day plan with verses + journaling + habit tie-in
+- `Explain Psalm 23 with Hebrew` → literal + context + application to finance/habits
+- `Summarize my last 7 days with faith lens` → uses local DB (habits, transactions, journals) + scripture
+- `Help with cybersecurity management paper outline` → personal project mode, uses your local notes
+
+Fallback: Surface offline → auto tries on-device TinyLlama if downloaded, else shows tip to download.
+
+---
+
+## $99/yr Apple Developer — PUSH 5 Plan
+
+Currently sideloaded. PUSH 5 assumes you enroll ($99/yr = $8.25/mo).
+
+**What it unlocks for iPhone 17 Pro Max → 18 Pro Max:**
+- TestFlight — push to your 17 Pro Max without cable, no more `flutter run -d ios` debug
+- App Store Connect private distribution for Life Command Center
+- Push Notifications — habit reminders, prayer reminders, encrypted sync alerts
+- Background Modes — home_widget timeline refresh, VPN-aware reachability detection for Xfinity 127.0.0.1:9339
+- App Groups + Keychain — secure storage for encrypted journal + faith notes (replaces `encrypt: ^5.0.3` plaintext keys)
+- CloudKit private (optional, zero fees if private DB) — E2E encrypted sync Surface ↔ iPhone 17 → 18 upgrade
+
+**Cost vs value:** $8.25/mo vs $20 ChatGPT + $15 Bible app + $10 habit tracker = $45/mo. Sovereign after.
+
+**TODO for PUSH 5:**
+- Enroll, bundle `com.calebmclean.onyxbeacon`, enable App Groups, Keychain, Background Modes
+- Replace `home_widget` with WidgetKit iOS 20 lock screen widgets (verse of day, habit streak)
+- Sign provisioning for 17 Pro Max, seamless restore to 18 Pro Max via iCloud backup
+
+---
+
+## Cybersecurity Management Master's — Applied to Onyx
+
+Thesis-friendly features in PUSH 4:
+
+**1. Zero-Trust Local-First:**
+- Now: `baseUrl` hardcoded `192.168.1.15:11434` — no TLS, IP spoofable
+- PUSH 5: mTLS Surface↔iPhone (self-signed cert pin), document Xfinity `127.0.0.1:9339` as local MITM proxy threat model — perfect for risk assessment paper
+
+**2. Encryption at Rest:**
+- Now: `encrypt` + `crypto` with keys in `getApplicationDocumentsDirectory`
+- PUSH 5: iOS Keychain via `flutter_secure_storage` + Secure Enclave Face ID for Bible journal, Surface DPAPI via `win32`, map to NIST 800-53 SC-28
+
+**3. Logging & Compliance:**
+- Add table `security_events` (login, model download, VPN block 127.0.0.1:9339, prompt injection attempt)
+- Capstone: Map Onyx to CIS Controls v8, produce SOC 2 Type I evidence (local-first = no vendor risk)
+
+**4. Threat Intel Tab (idea for class):**
+- New tab: `Xfinity VPN Analysis` — reads VPN config (type, server, Connect On Demand), flags `127.0.0.1` local proxy risk, recommends on-device fallback
+- Presentation: "Consumer ISP VPN vs Local AI Availability"
+
+---
+
+## 2026 iPhone Integrations — Possibilities & Limitations
+
+**iPhone 17 Pro Max (iOS 20, A19 Pro, 12GB RAM, 8-core Neural Engine) — NOW:**
+
+Can do:
+- Apple Intelligence + App Intents: expose `Summarize my week` + `Bible verse` as Siri shortcut
+- Local Network privacy: `NSLocalNetworkUsageDescription` required — you must allow in Settings → Privacy & Security → Local Network → Onyx ON (was root cause of timeout besides VPN)
+- On-device: TinyLlama 1.1B Q4 600MB works, but 17 Pro Max can run Llama 3.2 3B Q4 (2GB) or Phi-3 Mini 3.8B (2.2GB) smoothly — deeper faith exegesis
+- Live Activities + Dynamic Island: show AI thinking progress during 60s Ollama call
+- Journal Suggestions API: suggest faith journaling from locations/workouts
+
+Can't do / Limits:
+- Xfinity `127.0.0.1:9339` — app cannot programmatically disable VPN (Apple privacy). Must be manual in Xfinity app or Settings
+- Background fllama — iOS kills after 30s — download must be foreground, generation chunked to 512 tokens
+- No JIT — Metal only, larger models slower than Surface llama3 8B
+
+**iPhone 18 Pro Max (expected late 2027, A20 Pro, 16GB RAM, 20-core Neural Engine, iOS 21) — PLANNING:**
+
+- 16GB RAM → run Llama 3.1 8B Q4 (~4.5GB) fully on-device — no Surface needed for deep Bible scholar
+- 2x Neural Engine tokens/sec — cross-ref <5s vs 15s now
+- Rumored Apple FoundationModels on-device (GPT 4o-mini class) — could replace fllama, zero download in iOS 21
+- Wi-Fi 7 + rotating private Wi-Fi address — hardcoded `192.168.1.15` breaks, need mDNS `onyx-beacon.local` (PUSH 5)
+- Migration: App Groups + Keychain auto-migrates via iCloud if $99/yr enrolled, else encrypted local export
+
+**Recommendation:** Stay on 17 Pro Max for PUSH 4-5 with 3B model, evaluate 18 Pro Max for 8B on-device capstone demo: "Sovereign AI Faith Study on 16GB Edge Device" — ties to cybersecurity + personal projects.
+
+---
+
+## Push to Phone
+
 ```powershell
 cd C:\Users\djtwi\onyx_beacon
-Remove-Item lib\main.dart -Force
-Copy-Item $HOME\Downloads\main_PUSH3_0_INTERACTIVE_FINAL3_FIXED.dart lib\main.dart -Force
-flutter clean
-flutter pub get
+git add pubspec.yaml lib/main.dart README.md
+git commit -m "PUSH 4.1: Xfinity 127.0.0.1:9339 accurate + Download 600MB real AI faith + iPhone 17 Pro Max 2026 + $99/yr + CySec"
+git push
+flutter clean; flutter pub get
 flutter run -d windows
-# Tap Daily Briefing numbers → dialogs work
+# iPhone 17 Pro Max: flutter run -d ios (or build ios --release for TestFlight after $99)
 ```
-
-### iPhone 17 Pro Max — Free Cable (No $99 yet)
-```powershell
-flutter run -d "iPhone 17 Pro Max"
-# Command → Daily Briefing → Tap Habits Due → complete
-```
-
-### Build Validation (This file)
-- Lines: 2191
-- Brace diff: 0
-- Duplicate `_DailyBriefingWidgetState`: 1 (good)
-- Long lines >400: 0
-- GEE892CD5 `===` error: Fixed (was ` & NAVIGATION` leftover at line 759)
-- G297C951C col 856: Fixed (split Rows)
-- DB methods: `toggleHabitCompletion`, `updateTaskCompletion` exist
-
----
-
-## 🔒 Why No Real Home Screen Widgets For Free?
-
-**iOS locks App Groups behind $99 Apple Developer Program.**
-
-- Real widget needs `group.onyxbeacon` so Runner ↔ Widget Extension share data
-- Free Apple ID can't create App Groups → Codemagic shows "No signing files"
-- `home_widget` plugin is free, WidgetKit is free, but entitlement is paid
-
-**What free CAN do:**
-- Internal interactive briefing (PUSH 3.0) — ✅ You have it
-- Shortcuts widget → Open Onyx Beacon button — free, no data
-- Android home screen widgets — ✅ Free, sideload APK
-
-**What $99 unlocks (PUSH 4):**
-- App Groups + TestFlight + App Store + Small/Medium/Large + Lock Screen + StandBy widgets for iPhone 17 Pro Max
-
----
-
-## 🗓️ PUSH 4 — When You Get Mac mini + $99
-
-1. Enroll https://developer.apple.com/programs/ $99
-2. developer.apple.com → Identifiers → New App Group `group.onyxbeacon` → Assign to `com.caleb.onyxbeacon` + `com.caleb.onyxbeacon.OnyxBeaconWidgets`
-3. Xcode: Open `ios/Runner.xcworkspace` → Signing → App Groups → check `group.onyxbeacon` for Runner + OnyxBeaconWidgetsExtension
-4. File → New → Target → Widget Extension → `OnyxBeaconWidgets` → Replace Swift with `ios/OnyxBeaconWidgets/OnyxBeaconWidgets.swift` (already pushed)
-5. Build → Long press home → + → Onyx Beacon
-
-Or Codemagic: Connect GitHub + Apple Dev → Build M2 Mac → TestFlight.
-
-No Flutter code change — data already saved.
-
----
-
-## 🛠️ Stack
-Flutter 3.24+ stable, sqflite, encrypt 5.0.3, window_manager 0.4.3, system_tray 2.0.3, launch_at_startup 0.4.0, home_widget 0.8.1, fl_chart 0.71.0, share_plus
 
 **Files:**
-- `lib/main.dart` — 2191 lines — FINAL3_FIXED — Interactive briefing
-- `ios/OnyxBeaconWidgets/OnyxBeaconWidgets.swift` — 212 lines — PUSH 4 ready
-- `pubspec.yaml` — PUSH 3 deps
+- `pubspec.yaml` — 1.0.0+7, fllama git main, uuid override
+- `lib/main.dart` — 3477 lines, services import, no const ClipboardData, SelectableText, Xfinity Fix chip, Download 600MB with progress, Bible-aware, real time
+- `README.md` — this file
 
 ---
 
-## 📦 History
-- v5.3.1: 1834 lines — Screenshot fixes, builds
-- v6.1 FINAL: 1985 lines — Color, briefing static, encrypted, tray, home_widget data
-- PUSH 3.0 FIXED2: 1986 lines — setTab, static
-- **PUSH 3.0 FINAL Interactive FINAL3_FIXED: 2191 lines — Tap to complete habits/tasks, tap Net Today to Finance, fix header bug — CURRENT, works**
+## Checklist
 
----
-
-## 👤 Caleb McLean — Detroit, MI
-
-**Welcome back, Caleb.** Tap your Daily Briefing.
-
-**PUSH 3.0 DONE (Free). PUSH 4 = Mac mini + $99 = Real iPhone 17 Pro Max home screen widgets.**
-
----
-License: Private — Onyx Beacon — All rights reserved.
+- [ ] Replace lib/main.dart with 3477-line fixed (has `import services.dart`)
+- [ ] `flutter clean; flutter pub get; flutter run -d windows` — no Clipboard error
+- [ ] iPhone 17 Pro Max: Settings → Privacy → Local Network → Onyx ON
+- [ ] AI Chat → gear → Download 600MB (or 2-3GB for deeper faith)
+- [ ] Test with Xfinity VPN ON: `Explain Romans 8:28 Greek`
+- [ ] Test with Xfinity VPN OFF + Surface: Save & Test `http://192.168.1.15:11434`
+- [ ] Enroll $99/yr when ready for PUSH 5 TestFlight + WidgetKit
+- [ ] Document Xfinity 127.0.0.1:9339 case for cybersecurity paper

@@ -3216,7 +3216,7 @@ class _AiChatTabState extends State<AiChatTab> {
     _messages.add({
       'role': 'assistant',
       'text': 'Hi Caleb — I\'m your local Onyx Beacon AERO (Ollama). '
-      'Zero cloud, zero fees. Ask me to improve writing, summarize your week, '
+      'Ask me to improve writing, summarize your week, '
       'analyze habits, or brainstorm.\n\n'
       'Try: \"Summarize my last 7 days\" or \"Help me expand chapter 2\"'
     });
@@ -3227,37 +3227,76 @@ class _AiChatTabState extends State<AiChatTab> {
     setState(()=>_online=ok);
   }
 
-  Future<void> _showAeroSettings() async {
+    Future<void> _showAeroSettings() async {
     final urlCtrl = TextEditingController(text: AiCopilotService.baseUrl);
     final modelCtrl = TextEditingController(text: AiCopilotService.model);
-    showDialog(context: context, builder: (ctx)=>AlertDialog(
-      title: const Text('AERO Settings — Local Offline'),
-      content: SingleChildScrollView(
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children:[
-          const SelectableText(
-            'Windows: http://localhost:11434 — iPhone same Wi-Fi: http://192.168.1.15:11434 (your Windows IP). Zero cloud. Long-press to copy.',
-            style: TextStyle(fontSize:11),
+    final hasModel = await AeroOnDeviceService.checkModelExists();
+    showDialog(context: context, builder: (ctx){
+      double progress = AeroOnDeviceService.downloadProgress;
+      bool downloading = AeroOnDeviceService.isDownloading;
+      return StatefulBuilder(builder: (ctx2, setState2){
+        return AlertDialog(
+          title: const Text('AERO Settings - Real AI + Bible'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children:[
+              const SelectableText(
+                'XFINITY VPN blocks Surface (127.0.0.1:9339). Fix: Open Xfinity app -> Internet -> Advanced Security OFF, OR iPhone Settings -> VPN -> Xfinity VPN -> Connect On Demand OFF. Then retry.',
+                style: TextStyle(fontSize:11, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height:6),
+              const SelectableText(
+                'Windows: http://localhost:11434\n'
+                'iPhone same Wi-Fi: http://192.168.1.15:11434 (run ipconfig on Surface to confirm IP, it changes). Long-press to copy.',
+                style: TextStyle(fontSize:11),
+              ),
+              const SizedBox(height:8),
+              Wrap(spacing:6, runSpacing:4, children:[
+                ActionChip(label: const Text('Copy Win', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(ClipboardData(text: 'http://localhost:11434')); ScaffoldMessenger.of(ctx2).showSnackBar(const SnackBar(content: Text('Copied Windows URL'))); }),
+                ActionChip(label: const Text('Copy iPhone', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(ClipboardData(text: 'http://192.168.1.15:11434')); ScaffoldMessenger.of(ctx2).showSnackBar(const SnackBar(content: Text('Copied iPhone URL'))); }),
+                ActionChip(label: const Text('Copy Serve', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(ClipboardData(text: 'OLLAMA_HOST=0.0.0.0 ollama serve')); ScaffoldMessenger.of(ctx2).showSnackBar(const SnackBar(content: Text('Copied serve cmd'))); }),
+                ActionChip(label: const Text('Xfinity Fix', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(ClipboardData(text: 'Xfinity app -> Advanced Security OFF')); ScaffoldMessenger.of(ctx2).showSnackBar(const SnackBar(content: Text('Xfinity app -> Advanced Security OFF to allow local'))); }),
+              ]),
+              const SizedBox(height:12),
+              TextField(controller: urlCtrl, decoration: const InputDecoration(labelText: 'AERO URL (paste)', hintText: 'http://192.168.1.15:11434', border: OutlineInputBorder())),
+              const SizedBox(height:8),
+              TextField(controller: modelCtrl, decoration: const InputDecoration(labelText: 'Model', hintText: 'llama3', border: OutlineInputBorder())),
+              const Divider(height:20),
+              const Text('ON-DEVICE REAL AI (VPN-friendly, offline Bible)', style: TextStyle(fontSize:12, fontWeight: FontWeight.bold)),
+              const SizedBox(height:4),
+              Text(hasModel ? 'Model downloaded - real AI works with VPN ON' : 'No on-device model - Surface required', style: TextStyle(fontSize:11, color: hasModel ? Colors.green : Colors.red)),
+              const SizedBox(height:6),
+              if(downloading) LinearProgressIndicator(value: progress>0?progress:null),
+              const SizedBox(height:6),
+              Row(children:[
+                Expanded(child: ElevatedButton.icon(
+                  icon: Icon(hasModel ? Icons.check : Icons.download),
+                  label: Text(hasModel ? 'Redownload 600MB' : 'Download 600MB Model'),
+                  onPressed: downloading ? null : () async {
+                    setState2((){ downloading = true; });
+                    final ok = await AeroOnDeviceService.downloadModel(onProgress: (p){ setState2((){ progress = p; }); });
+                    setState2((){ downloading = false; progress = 1.0; });
+                    ScaffoldMessenger.of(ctx2).showSnackBar(SnackBar(content: Text(ok ? 'Model ready - VPN-friendly Bible AI works now!' : 'Download failed, check internet'))); 
+                  },
+                )),
+                if(hasModel) const SizedBox(width:6),
+                if(hasModel) IconButton(icon: const Icon(Icons.delete, size:18), onPressed: () async { await AeroOnDeviceService.deleteModel(); setState2((){}); }, tooltip: 'Delete model'),
+              ]),
+              const SizedBox(height:6),
+              const SelectableText('Bible mode: Ask Explain Romans 8:28 Greek or Bible plan for anxiety - works offline after download', style: TextStyle(fontSize:10, fontStyle: FontStyle.italic)),
+              const SizedBox(height:8),
+              SelectableText('Now: ${DateFormat('yyyy-MM-dd HH:mm EEEE').format(DateTime.now())} Detroit | iPhone 17 Pro Max 2026', style: const TextStyle(fontSize:10, color: Colors.grey)),
+            ]),
           ),
-          const SizedBox(height:8),
-          Wrap(spacing:6, runSpacing:4, children:[
-            ActionChip(label: const Text('Copy Win', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(ClipboardData(text: 'http://localhost:11434')); ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Copied Windows URL'))); }),
-            ActionChip(label: const Text('Copy iPhone', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(ClipboardData(text: 'http://192.168.1.15:11434')); ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Copied iPhone URL'))); }),
-            ActionChip(label: const Text('Copy Serve', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(ClipboardData(text: 'OLLAMA_HOST=0.0.0.0 ollama serve')); ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Copied serve cmd'))); }),
-          ]),
-          const SizedBox(height:12),
-          TextField(controller: urlCtrl, decoration: const InputDecoration(labelText: 'AERO URL (paste)', hintText: 'http://192.168.1.15:11434', border: OutlineInputBorder())),
-          const SizedBox(height:8),
-          TextField(controller: modelCtrl, decoration: const InputDecoration(labelText: 'Model', hintText: 'llama3', border: OutlineInputBorder())),
-          const SizedBox(height:8),
-          SelectableText('Now: ${DateFormat('yyyy-MM-dd HH:mm EEEE').format(DateTime.now())} Detroit', style: const TextStyle(fontSize:10, color: Colors.grey)),
-        ]),
-      ),
-      actions:[
-        TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text('Cancel')),
-        ElevatedButton(onPressed: (){ AiCopilotService.setCustomEndpoint(urlCtrl.text.trim(), modelCtrl.text.trim()); Navigator.pop(ctx); _checkOnline(); }, child: const Text('Save & Test')),
-      ],
-    ));
+          actions:[
+            TextButton(onPressed: ()=>Navigator.pop(ctx2), child: const Text('Close')),
+            ElevatedButton(onPressed: (){ AiCopilotService.setCustomEndpoint(urlCtrl.text.trim(), modelCtrl.text.trim()); Navigator.pop(ctx2); _checkOnline(); }, child: const Text('Save & Test')),
+          ],
+        );
+      });
+    });
   }
+
+
 
   Future<void> _sendMessage() async {
     final text = _inputCtrl.text.trim();
