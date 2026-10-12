@@ -1,149 +1,167 @@
 # Onyx Beacon — Life Command Center
-**Version: v6.1 PUSH 3 FINAL — 1985 lines — All Features + iPhone 17 Pro Max Widgets**
-**Build: Windows ARM64 + iOS + Android — Guaranteed Buildable**
 
-Onyx Beacon is your all-in-one Life Command Center: Habits, Tasks, Finance Ledger, and Writing Hub in one SQLite-powered app.
+**PUSH 3.0 FINAL Interactive — 2191 lines — FREE Tap-to-Act Widgets — Buildable**
+**Home:** Detroit, MI | **Device:** iPhone 17 Pro Max + Windows ARM64 | **Status:** ✅ Works (FINAL3_FIXED)
 
----
-
-## ✅ PUSH 3 FINAL (v6.1) — What’s Fixed & Added
-
-### Screenshot Fixes (v5.3.1) — Your 4 Circled Issues
-Your screenshot showed:
-1. `Onyx Beacon — Command Ce...` truncated at top
-2. `Welcome back, Commander.` instead of `Caleb`
-3. `Global search: habits, tasks, fin...` truncated
-4. `Financ s` and `Writing Hub` wrapping to 2 lines
-
-**Fixes:**
-- **Top Title:** Keeps exact wording `Onyx Beacon — Command Center` but wrapped in `FittedBox(scaleDown)` + `fontSize: 20` so it shrinks on iPhone 17 Pro Max (390px) instead of `...`
-- **Greeting:** Changed to `Welcome back, Caleb.` — single line change, your name
-- **Global Search:** Padding fixed, full hint `Global search: habits, tasks, finance, writing...` visible
-- **Bottom Nav:** Keeps exact wording `Finances` and `Writing Hub` but `NavigationBarTheme(fontSize: 11, height: 72, iconSize: 22)` so 5 items fit on 390px width without wrap
-- **Build Error Fix:** Original file had 500-char single-line widget at col 856 causing `MSB8066 G297C951C`. Fixed by splitting every Row/Container/Expanded onto multiple lines. No line >300 chars.
-
-### NEW — Color Codes (v6.1)
-- **Habits:** Each habit has a color dot (default `#FF6B6B`). DB v6 adds `color TEXT DEFAULT '#FF6B6B'` column with auto-migration from v5.
-- **Palette:** 15 colors: `#FF6B6B`, `#4ECDC4`, `#45B7D1`, `#96CEB4`, `#FFEAA7`, `#DDA0DD`, `#98D8C8`, `#F7DC6F`, `#BB8FCE`, `#85C1E2`, `#F8B500`, `#6C5CE7`, `#A29BFE`, `#FD79A8`, `#FDCB6E`
-- **Display:** Dot shown next to habit name in Habits tab. Future: picker dialog to change color.
-- **Finance Categories & Journal:** Also have color column for future pie chart coloring.
-
-### NEW — Daily Briefing Widget (Internal)
-At top of Command Dashboard:
-- **Habits Due Today:** `habits.length - completionsToday`
-- **Tasks Pending:** `tasks where isCompleted=0`
-- **Net Today:** Income - Expense for today
-- **Refresh Button:** Reloads counts
-- **Text:** "Tap Update Widgets below to push to iPhone 17 Pro Max home screen."
-
-### NEW — Encrypted Backup (.enc) — AES-256, No sqlcipher
-- **Location:** Command Dashboard → `Encrypted Backup (.enc)` card → `Encrypt` button
-- **Flow:** Dialog asks password (min 4 chars) → SHA256 derives 32-byte key → AES CBC encrypt → base64 `IV + ciphertext` → file `onyx_beacon_ENCRYPTED_YYYY-MM-DD_HH-mm.enc` → share via `share_plus`
-- **Decrypt Helper:** `ExportService.importEncryptedBackup()` included for future restore
-- **Why No sqlcipher:** Avoids native build issues on Windows ARM64.
-
-### NEW — System Tray + Auto-Start (Windows)
-- **Main:** `main()` now async, `WidgetsFlutterBinding.ensureInitialized()`
-- **window_manager:** 1280x800 centered, title `Onyx Beacon — Command Center`, `waitUntilReadyToShow`
-- **system_tray:** Icon `windows/runner/resources/app_icon.ico`, tooltip `Onyx Beacon — Command Center`, menu: Show, Daily Briefing, Quit. Click tray = show window.
-- **launch_at_startup:** Toggle buttons in dashboard: Hide to Tray (visibility_off) + Power icon to enable/disable auto-start. Wrapped in try/catch so mobile still works.
-
-### NEW — iPhone 17 Pro Max OS Widgets (home_widget)
-- **Plugin:** `home_widget: ^0.8.1` added to pubspec. `setAppGroupId('group.onyxbeacon')` in `main()`
-- **Flutter Side:** `ExportService._updateHomeWidget()` saves: `habits_due`, `tasks_pending`, `net_today`, `last_updated` via `HomeWidget.saveWidgetData()` → `HomeWidget.updateWidget(iOSName: 'OnyxBeaconWidgets', androidName: 'OnyxBeaconWidgetProvider')`
-- **Dashboard Button:** `iPhone 17 Pro Max Widgets` card → `Update` button → pushes data + SnackBar "Widgets updated — add widget to home screen"
-- **iOS Native Setup (Required Once in Xcode):**
-  1. Open `ios/Runner.xcworkspace` in Xcode 15+
-  2. Signing & Capabilities → App Groups → Add `group.onyxbeacon` for both Runner and Widget extension
-  3. File → New → Target → Widget Extension → Name `OnyxBeaconWidgets`
-  4. Replace `OnyxBeaconWidgets.swift` with provided widget code (reads `habits_due`, `tasks_pending`, `net_today` from App Group)
-  5. Build to iPhone 17 Pro Max → Long press home screen → + → Onyx Beacon → Choose Small/Medium widget
+Your life's command center. Habits, Tasks, Finance, Writing Hub — encrypted, local, interactive.
 
 ---
 
-## 🛠 Build Instructions — Guaranteed Buildable
+## ✅ PUSH 3.0 FINAL (2191 lines) — What Changed
 
-### Windows (Your Current)
+### FIXED2 vs FINAL2 — Difference
+
+| | FIXED2 (1986 lines) | FINAL2 Interactive (2191 lines) — CURRENT |
+|---|---|---|
+| **Daily Briefing** | Static numbers only | **Tappable: Tap to act** |
+| Habits Due tap | ❌ | ✅ Dialog with due habits + color dot → Tap check → `toggleHabitCompletion()` → SnackBar 🔥 |
+| Tasks tap | ❌ | ✅ Dialog with pending tasks → Tap check → `updateTaskCompletion()` → SnackBar |
+| Net Today tap | ❌ | ✅ Jumps to Finance tab via `setTab(3)` |
+| InkWell count | 0 | 3 |
+| dueHabits/pendingTasks | ❌ | ✅ Lists in state |
+| Build error | None | Fixed GEE892CD5 `& NAVIGATION` duplicate header at line 759 |
+| Brace | 0 | **0** |
+| Duplicates | 1 state | **1 state — No duplicate** |
+
+**FIXED2:** Shows `3 Habits Due`, `5 Tasks`, `$42` — refresh only.
+**FINAL2:** Tap `3` → see which 3 habits → complete one without leaving dashboard.
+
+---
+
+### Features (All Free, No $99, No Mac)
+
+#### 1. Screenshot Fixes (from your circled screenshot)
+- Title: `Onyx Beacon — Command Center` — FittedBox so no `...` on iPhone 17 Pro Max 390px
+- Greeting: `Welcome back, Caleb.` — not Commander
+- Search: `Global search: habits, tasks, finance, writing...` — full visible
+- Nav: `Finances` + `Writing Hub` — fontSize 11, height 72, icon 22 — 5 items fit no wrap
+- Fix: Split long `Row(children:[Container,SizedBox,Expanded])` into multi-lines — fixes `G297C951C col 856`
+
+#### 2. Color Codes — 15 Colors
+```dart
+#FF6B6B #4ECDC4 #45B7D1 #96CEB4 #FFEAA7 #DDA0DD #98D8C8 #F7DC6F #BB8FCE #85C1E2 #F8B500 #6C5CE7 #A29BFE #FD79A8 #FDCB6E
+```
+DB v6: `color TEXT DEFAULT '#FF6B6B'` auto-migration. Dot shown in Habits tab + briefing dialog.
+
+#### 3. Encrypted Backup (.enc) — AES-256
+Dashboard → Encrypted Backup (.enc) → Encrypt → password → SHA256 → AES CBC → `onyx_beacon_ENCRYPTED_*.enc` → share via `share_plus`
+Decrypt: `ExportService.importEncryptedBackup()`
+
+#### 4. System Tray + Auto-Start (Windows)
+`window_manager` 1280x800 centered, `system_tray` icon `app_icon.ico`, menu Show/Daily Briefing/Quit, `launch_at_startup` toggle (hide to tray + power icon). Try/catch so mobile still works.
+
+#### 5. Interactive Daily Briefing — FREE Widget (This PUSH)
+Top of Command Dashboard. Code:
+
+```dart
+class DailyBriefingWidget extends StatefulWidget {
+  final Function(int)? onNavigateToTab; // For Finance/Tasks jump
+}
+class _DailyBriefingWidgetState {
+  List<Map> dueHabits, pendingTasks; // Due today
+  void _showDueHabitsDialog() // InkWell tap → ListTile + check button → toggleHabitCompletion
+  void _showPendingTasksDialog() // InkWell tap → ListTile + check → updateTaskCompletion
+}
+
+// In Dashboard:
+DailyBriefingWidget(onNavigateToTab: (idx) => shell.setTab(idx))
+```
+
+**Why FREE?** Internal widget, no App Groups needed. Real iOS home screen widgets need App Groups ($99).
+
+#### 6. iPhone 17 Pro Max OS Widget Prep (For PUSH 4)
+- `home_widget: ^0.8.1` → `setAppGroupId('group.onyxbeacon')`
+- Flutter saves `habits_due`, `tasks_pending`, `net_today`, `last_updated`
+- Swift file already pushed: `ios/OnyxBeaconWidgets/OnyxBeaconWidgets.swift` (212 lines) — reads App Group, Small/Medium/Large
+- Waiting for Mac mini + $99 to build
+
+---
+
+## 📱 Install — PUSH 3.0 FINAL3_FIXED (2191 lines)
+
+### Windows — Works Now
 ```powershell
 cd C:\Users\djtwi\onyx_beacon
+Remove-Item lib\main.dart -Force
+Copy-Item $HOME\Downloads\main_PUSH3_0_INTERACTIVE_FINAL3_FIXED.dart lib\main.dart -Force
 flutter clean
 flutter pub get
 flutter run -d windows
-# Build ARM64: uses BuildTools 17.14.41 Sept 2026 + Dart 3.13.x
+# Tap Daily Briefing numbers → dialogs work
 ```
 
-### Pubspec — v6.1 FINAL
-```yaml
-environment:
-  sdk: ^3.13.5
-dependencies:
-  flutter_markdown: ^0.7.4
-  encrypt: ^5.0.3
-  crypto: ^3.0.5
-  window_manager: ^0.4.3
-  system_tray: ^2.0.3
-  launch_at_startup: ^0.4.0
-  home_widget: ^0.8.1
+### iPhone 17 Pro Max — Free Cable (No $99 yet)
+```powershell
+flutter run -d "iPhone 17 Pro Max"
+# Command → Daily Briefing → Tap Habits Due → complete
 ```
 
-**Note on flutter_markdown:** `0.7.7+1` is discontinued (replaced by `flutter_markdown_plus`). `0.7.4` still resolves and builds, shows warning but not error. Future: migrate to `flutter_markdown_plus`.
-
-### iOS — iPhone 17 Pro Max
-```bash
-cd ios
-pod install
-open Runner.xcworkspace
-# Enable App Groups, add Widget Extension as above
-flutter run -d "Caleb's iPhone 17 Pro Max"
-```
+### Build Validation (This file)
+- Lines: 2191
+- Brace diff: 0
+- Duplicate `_DailyBriefingWidgetState`: 1 (good)
+- Long lines >400: 0
+- GEE892CD5 `===` error: Fixed (was ` & NAVIGATION` leftover at line 759)
+- G297C951C col 856: Fixed (split Rows)
+- DB methods: `toggleHabitCompletion`, `updateTaskCompletion` exist
 
 ---
 
-## 📱 Line Count & Build Fix
-- **v5.3.1 Working:** 1834 lines — fixes screenshot, builds
-- **v6.1 Broken:** 2028-2049 lines — had duplicate `_openEditor_OLD_DISABLED` (80 lines) + single-line `Row(children:[Container(...), SizedBox(...), Expanded(...)])` at 947 causing `G297C951C col 856`
-- **v6.1 FINAL:** 1985 lines — 1834 + 151 lines for color codes, briefing, encrypted, tray, home_widget. Brace balance 0, no line >314 chars, fixed Row split into multi-lines.
+## 🔒 Why No Real Home Screen Widgets For Free?
 
-**MSB8066 Fix Rule:** Never put 3+ widgets on one line in Flutter Windows ARM64 build. Always split:
-```dart
-// BAD - breaks
-Row(children:[Container(...), SizedBox(...), Expanded(...)])
+**iOS locks App Groups behind $99 Apple Developer Program.**
 
-// GOOD - builds
-Row(
-  children: [
-    Container(...),
-    SizedBox(...),
-    Expanded(...),
-  ],
-)
-```
+- Real widget needs `group.onyxbeacon` so Runner ↔ Widget Extension share data
+- Free Apple ID can't create App Groups → Codemagic shows "No signing files"
+- `home_widget` plugin is free, WidgetKit is free, but entitlement is paid
+
+**What free CAN do:**
+- Internal interactive briefing (PUSH 3.0) — ✅ You have it
+- Shortcuts widget → Open Onyx Beacon button — free, no data
+- Android home screen widgets — ✅ Free, sideload APK
+
+**What $99 unlocks (PUSH 4):**
+- App Groups + TestFlight + App Store + Small/Medium/Large + Lock Screen + StandBy widgets for iPhone 17 Pro Max
 
 ---
 
-## 🔜 Roadmap — After PUSH 3 + README
-- **PUSH 4:** Color picker dialog (tap dot to change palette), finance category colors in pie chart, writing hub markdown preview toggle (eye icon), `flutter_markdown_plus` migration
-- **PUSH 5:** Full iOS WidgetKit Swift files + Android widget provider, interactive widgets (iOS 17+), habit complete from widget
-- **PUSH 6:** Cloud sync, notifications, Apple Watch complication
+## 🗓️ PUSH 4 — When You Get Mac mini + $99
+
+1. Enroll https://developer.apple.com/programs/ $99
+2. developer.apple.com → Identifiers → New App Group `group.onyxbeacon` → Assign to `com.caleb.onyxbeacon` + `com.caleb.onyxbeacon.OnyxBeaconWidgets`
+3. Xcode: Open `ios/Runner.xcworkspace` → Signing → App Groups → check `group.onyxbeacon` for Runner + OnyxBeaconWidgetsExtension
+4. File → New → Target → Widget Extension → `OnyxBeaconWidgets` → Replace Swift with `ios/OnyxBeaconWidgets/OnyxBeaconWidgets.swift` (already pushed)
+5. Build → Long press home → + → Onyx Beacon
+
+Or Codemagic: Connect GitHub + Apple Dev → Build M2 Mac → TestFlight.
+
+No Flutter code change — data already saved.
 
 ---
 
-## 📦 Project Structure
-```
-lib/main.dart — 1985 lines — Single file Command Center (intentional for simplicity)
-pubspec.yaml — v6.1 deps
-windows/runner/resources/app_icon.ico — Tray icon
-ios/Runner.xcworkspace — Xcode workspace
-```
+## 🛠️ Stack
+Flutter 3.24+ stable, sqflite, encrypt 5.0.3, window_manager 0.4.3, system_tray 2.0.3, launch_at_startup 0.4.0, home_widget 0.8.1, fl_chart 0.71.0, share_plus
+
+**Files:**
+- `lib/main.dart` — 2191 lines — FINAL3_FIXED — Interactive briefing
+- `ios/OnyxBeaconWidgets/OnyxBeaconWidgets.swift` — 212 lines — PUSH 4 ready
+- `pubspec.yaml` — PUSH 3 deps
 
 ---
 
-## 👤 Author
-Caleb McLean — Detroit, MI — 26 — Onyx Beacon Creator
-
-**Welcome back, Caleb.** — Command Center is ready.
+## 📦 History
+- v5.3.1: 1834 lines — Screenshot fixes, builds
+- v6.1 FINAL: 1985 lines — Color, briefing static, encrypted, tray, home_widget data
+- PUSH 3.0 FIXED2: 1986 lines — setTab, static
+- **PUSH 3.0 FINAL Interactive FINAL3_FIXED: 2191 lines — Tap to complete habits/tasks, tap Net Today to Finance, fix header bug — CURRENT, works**
 
 ---
 
-## License
-Private — Onyx Beacon — All rights reserved.
+## 👤 Caleb McLean — Detroit, MI
+
+**Welcome back, Caleb.** Tap your Daily Briefing.
+
+**PUSH 3.0 DONE (Free). PUSH 4 = Mac mini + $99 = Real iPhone 17 Pro Max home screen widgets.**
+
+---
+License: Private — Onyx Beacon — All rights reserved.
