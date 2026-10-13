@@ -2243,7 +2243,7 @@ class _FinanceTabState extends State<FinanceTab> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Finance Ledger & Budget'),
+        title: const Text('Finance Ledger'),
         actions: [
           IconButton(icon: Icon(_showCharts ? Icons.bar_chart : Icons.bar_chart_outlined), tooltip: 'Toggle Charts', onPressed: () => setState(() => _showCharts = !_showCharts)),
           IconButton(icon: const Icon(Icons.date_range), tooltip: 'Filter by Date', onPressed: _pickDateRange),
@@ -3098,7 +3098,7 @@ class _JournalTabState extends State<JournalTab> {
   Widget build(BuildContext context){
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Writing Hub & Micro-Journal'),
+        title: const Text('Journal Workspace'),
         actions: [
           IconButton(icon: Icon(_isKanbanView?Icons.view_list:Icons.view_kanban), tooltip: _isKanbanView?'List View':'Kanban Board', onPressed: ()=>setState(()=>_isKanbanView=!_isKanbanView)),
           IconButton(icon: const Icon(Icons.file_download), tooltip: 'Export JSON', onPressed: ()=>ExportService.exportJournalJson(_filteredEntries)),
@@ -3256,7 +3256,7 @@ class _GalleryTabState extends State<GalleryTab> {
     }
   }
   @override Widget build(BuildContext context){
-    return Scaffold(appBar: AppBar(title: const Text("Gallery — In-App + Phone"), actions:[IconButton(icon: const Icon(Icons.photo_library), tooltip: 'Add from phone gallery', onPressed: _pickPhone), IconButton(icon: const Icon(Icons.refresh), onPressed: _load)]), floatingActionButton: FloatingActionButton.extended(onPressed: _take, icon: const Icon(Icons.camera_alt), label: const Text("Take Picture")), body: _images.isEmpty ? const Center(child: Text("No pictures yet.\n• Take with phone camera\n• Add from phone gallery\n• Tap a photo to view or delete\n• Offline AERO/gallery", textAlign: TextAlign.center)) : GridView.builder(padding: const EdgeInsets.all(8), gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount:3, crossAxisSpacing:6, mainAxisSpacing:6), itemCount: _images.length, itemBuilder: (ctx,i){ final p = _images[i]; return GestureDetector(onTap: ()=>_showPhoto(p), child: ClipRRect(borderRadius: BorderRadius.circular(12), child: Image.file(File(p), fit: BoxFit.cover))); }),);
+    return Scaffold(appBar: AppBar(title: const Text("Gallery"), actions:[IconButton(icon: const Icon(Icons.photo_library), tooltip: 'Add from phone gallery', onPressed: _pickPhone), IconButton(icon: const Icon(Icons.refresh), onPressed: _load)]), floatingActionButton: FloatingActionButton.extended(onPressed: _take, icon: const Icon(Icons.camera_alt), label: const Text("Take Picture")), body: _images.isEmpty ? const Center(child: Text("No pictures yet.\n• Take with phone camera\n• Add from phone gallery\n• Tap a photo to view or delete\n• Offline AERO/gallery", textAlign: TextAlign.center)) : GridView.builder(padding: const EdgeInsets.all(8), gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount:3, crossAxisSpacing:6, mainAxisSpacing:6), itemCount: _images.length, itemBuilder: (ctx,i){ final p = _images[i]; return GestureDetector(onTap: ()=>_showPhoto(p), child: ClipRRect(borderRadius: BorderRadius.circular(12), child: Image.file(File(p), fit: BoxFit.cover))); }),);
   }
 }
 class GameTab extends StatefulWidget { const GameTab({super.key}); @override State<GameTab> createState() => _GameTabState(); }
