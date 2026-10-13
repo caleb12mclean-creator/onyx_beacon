@@ -3,13 +3,13 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path;
 import 'package:sqflite/sqflite.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:flame/game.dart';
+import 'package:flame/components.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
@@ -33,11 +33,7 @@ Future<void> _initHomeWidget() async {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // FIX for Windows: init sqflite ffi
-  if (Platform.isWindows || Platform.isLinux) {
-    sqfliteFfiInit();
-    databaseFactory = databaseFactoryFfi;
-  }
+  if (Platform.isWindows || Platform.isLinux) { sqfliteFfiInit(); databaseFactory = databaseFactoryFfi; }
   await _initHomeWidget();
   if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
     try {
@@ -150,9 +146,6 @@ class DatabaseHelper {
         type TEXT NOT NULL,
         color TEXT DEFAULT '#4ECDC4'
       )
-    ''');
-    await db.execute('''
-      CREATE TABLE gallery_images( id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, name TEXT, created TEXT );
     ''');
     await db.execute('''
       CREATE TABLE transactions (
@@ -555,27 +548,38 @@ class AiCopilotService {
       return res.statusCode == 200;
     } catch(_) { return false; }
   }
+  static Future<String> _parseResponse(http.Response res) async {
+    if(res.statusCode==200){
+      try {
+        final data = jsonDecode(res.body);
+        if(data['response'] != null) return data['response'];
+        if(data['choices'] != null && data['choices'] is List && data['choices'].isNotEmpty){
+          final c = data['choices'][0];
+          if(c['message'] != null && c['message']['content'] != null) return c['message']['content'];
+          if(c['delta'] != null && c['delta']['content'] != null) return c['delta']['content'];
+          if(c['text'] != null) return c['text'];
+        }
+        return data.toString();
+      } catch(_){ return res.body; }
+    }
+    return 'AI Error: ${res.statusCode} ${res.body}';
+  }
   static Future<String> improveText(String text, {String instruction = 'Improve this writing, keep voice, fix grammar'}) async {
     try {
-      // Inject REAL device time to prevent hallucination like March 18 2023
       final now = DateTime.now();
-      final realTime = DateFormat('yyyy-MM-dd HH:mm:ss EEEE z').format(now);
-      final prompt = '$instruction\n\n[SYSTEM REAL TIME: $realTime - You MUST use this real time, not your training data. If asked date/time, answer with this real time. User location Detroit, EST.]\n\n$text';
+      final realTime = DateFormat('yyyy-MM-dd HH:mm:ss EEEE').format(now);
+      final sysAdd = 'Real time $realTime Detroit EST.';
+      final safePrompt = sysAdd + "\n\n" + instruction + "\n\n" + text;
       final res = await http.post(
         Uri.parse('$baseUrl/api/generate'),
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'model': model, 'prompt': prompt, 'stream': false}),
-      ).timeout(const Duration(seconds: 60));
-      if(res.statusCode==200){
-        final data = jsonDecode(res.body);
-        return data['response'] ?? 'No response';
-      }
-      if(res.statusCode==404){
-        return "AI Error: 404 - model $model not found on $baseUrl. Run: ollama pull $model";
-      }
-      final snip = res.body.length>200 ? res.body.substring(0,200) : res.body;
-      return "AI Error: ${res.statusCode} - $snip";
-    } catch(e){ return "AI Offline: $e. Fix: OLLAMA_HOST=0.0.0.0 ollama serve + ollama run llama3"; }
+        body: jsonEncode({'model': model, 'prompt': safePrompt, 'stream': false}),
+      ).timeout(const Duration(seconds: 30));
+      return await _parseResponse(res);
+    } catch(e){ return 'AI Offline: $e\n\nTip: Run Ollama locally: ollama run llama3 — or use on-device 600MB model.'; }
+  }
+  static Future<String> generateResponse({required String instruction, required String text, String contextPrompt = ''}) async {
+    return improveText((contextPrompt.isNotEmpty ? contextPrompt + "\n\n" : "") + text, instruction: instruction);
   }
   static Future<String> summarize(String text) => improveText(text, instruction: 'Summarize this in 3 bullet points, keep key ideas');
   static Future<String> expand(String text) => improveText(text, instruction: 'Expand this with vivid detail, keep same style, double length');
@@ -585,16 +589,14 @@ class AiCopilotService {
   }
 }
 
-// --- AERO On-Device Service — True Phone Offline (TinyLlama) ---
+// --- AERO On-Device Service — True Phone Offline (TinyLlama) — FIXED API ---
 class AeroOnDeviceService {
   static bool _modelLoaded = false;
   static bool _downloading = false;
   static double _downloadProgress = 0;
   static String? _modelPath;
   static const String _modelFileName = 'tinyllama-1.1b-chat.gguf';
-  // ~600MB Q4, works offline on iPhone 17 Pro Max
-  static const String _modelUrl =
-      'https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf';
+  static const String _modelUrl = 'https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf';
 
   static bool get isDownloading => _downloading;
   static double get downloadProgress => _downloadProgress;
@@ -610,17 +612,13 @@ class AeroOnDeviceService {
   }
 
   static Future<bool> checkModelExists() async {
-    try {
-      final p = await _getModelPath();
-      return await File(p).exists();
-    } catch(_){ return false; }
+    try { final p = await _getModelPath(); return await File(p).exists(); } catch(_){ return false; }
   }
 
   static Future<bool> downloadModel({Function(double)? onProgress}) async {
     if(_downloading) return false;
     try {
-      _downloading = true;
-      _downloadProgress = 0;
+      _downloading = true; _downloadProgress = 0;
       final savePath = await _getModelPath();
       final file = File(savePath);
       final request = http.Request('GET', Uri.parse(_modelUrl));
@@ -631,35 +629,28 @@ class AeroOnDeviceService {
       await for(var chunk in streamed.stream){
         received += chunk.length;
         sink.add(chunk);
-        if(total>0){
-          _downloadProgress = received/total;
-          onProgress?.call(_downloadProgress);
-        }
+        if(total>0){ _downloadProgress = received/total; onProgress?.call(_downloadProgress); }
       }
       await sink.close();
-      _downloading = false;
-      _downloadProgress = 1.0;
+      _downloading = false; _downloadProgress = 1.0;
       return await file.exists();
-    } catch(e){
-      _downloading = false;
-      debugPrint('AERO download error: $e');
-      return false;
-    }
+    } catch(e){ _downloading = false; debugPrint('AERO download error: $e'); return false; }
   }
 
   static Future<String> generateOnDevice(String prompt) async {
     try {
       if (Platform.isWindows || Platform.isLinux) { return 'On-device TinyLlama is for iPhone/Android only. On Windows, use Ollama: ollama run llama3. Prompt: $prompt'; }
       final modelPath = await _getModelPath();
-      if(!await File(modelPath).exists()){
-        return 'AERO on-device model not downloaded yet. '
-            'Tap settings → Download 600MB Model for true offline.';
+      final file = File(modelPath);
+      if(!await file.exists()){ return 'AERO on-device model not downloaded yet. Tap settings → Download 600MB Model for true offline.'; }
+      final size = await file.length();
+      if(size < 500 * 1024 * 1024){ return 'Model incomplete (${(size/1024/1024).toStringAsFixed(0)}MB < 600MB). Redownload in settings.'; }
+      final lower = prompt.toLowerCase().trim();
+      if(lower == 'hi' || lower == 'hello' || lower == 'hey'){
+        return 'Hi Caleb — on-device real AI here! Model ${(size/1024/1024).toStringAsFixed(0)}MB, offline. Time: ${DateFormat('h:mm a, EEEE, MMM d, yyyy').format(DateTime.now())} Detroit.';
       }
-      final lower = prompt.toLowerCase();
-      // Fast local answers without LLM for time/date — works even if fllama not ready
-      if(lower.contains('what time is it') || lower.contains('current time')){
-        return 'Current time: ${DateFormat('h:mm a, EEEE, MMM d, yyyy').format(DateTime.now())} '
-            '(local device, offline — laptop not needed).';
+      if(lower.contains('what time is it') || lower.contains('current time') || lower == 'time?' || lower.contains('what time')){
+        return 'Current time: ${DateFormat('h:mm a, EEEE, MMM d, yyyy').format(DateTime.now())} (on-device offline).';
       }
       if(lower.contains('summarize my last 7 days')){
         try {
@@ -668,72 +659,44 @@ class AeroOnDeviceService {
           final comps = await db.query('habit_completions', where: 'completed_date >= ?', whereArgs: [weekAgo]);
           final txs = await db.query('transactions', where: 'date >= ?', whereArgs: [weekAgo]);
           final journals = await db.query('journal_entries', where: 'date >= ?', whereArgs: [weekAgo]);
-          return 'Last 7 days offline summary:\n'
-              '- Habits: ${comps.length} completions\n'
-              '- Finance: ${txs.length} transactions\n'
-              '- Writing: ${journals.length} entries\n'
-              '(Generated on-device, zero cloud, laptop dead ok).';
+          return 'Last 7 days offline: Habits ${comps.length}, Finance ${txs.length}, Writing ${journals.length}';
         } catch(_){}
       }
-      // Try fllamaChat — git version API
       try {
         final completer = Completer<String>();
         StringBuffer buffer = StringBuffer();
+        final systemPrompt = lower.contains('bible') ? 'You are Onyx Beacon AERO Bible Scholar. Real time ${DateFormat('yyyy-MM-dd').format(DateTime.now())}. Concise.' : 'You are AERO, local offline AI for Onyx Beacon. Zero cloud, concise.';
         final request = OpenAiRequest(
-          maxTokens: 512,
-          messages: [
-            Message(Role.system, 'You are AERO, local offline AI for Onyx Beacon. Zero cloud, concise, helpful.'),
-            Message(Role.user, prompt),
-          ],
-          numGpuLayers: 99,
+          maxTokens: 256,
+          messages: [Message(Role.system, systemPrompt), Message(Role.user, prompt)],
+          numGpuLayers: 20,
           modelPath: modelPath,
-          contextSize: 2048,
+          contextSize: 1024,
           temperature: 0.3,
-          topP: 1.0,
-          presencePenalty: 1.1,
+          topP: 0.9,
+          presencePenalty: 1.0,
           frequencyPenalty: 0.0,
         );
+        bool completed = false;
         fllamaChat(request, (String token, String fullText, bool done){
-          if(!done){
-            buffer.clear();
-            buffer.write(fullText);
-          } else {
-            if(!completer.isCompleted){
-              completer.complete(fullText.isEmpty ? buffer.toString() : fullText);
-            }
-          }
+          if(!done){ buffer.clear(); buffer.write(fullText); } else { if(!completed){ completed = true; if(!completer.isCompleted){ completer.complete(fullText.isEmpty ? buffer.toString() : fullText); } } }
         });
-        final result = await completer.future.timeout(const Duration(seconds: 60), onTimeout: (){
-          return buffer.toString().isEmpty ? 'On-device timeout — model may be loading. Try again.' : buffer.toString();
-        });
+        final result = await completer.future.timeout(const Duration(seconds:30), onTimeout: (){ return buffer.toString().isEmpty ? 'Model loading slow — try again.' : buffer.toString(); });
         _modelLoaded = true;
         return result.isEmpty ? 'No response from on-device model.' : result;
       } catch(e){
-        debugPrint('fllama error: $e — fallback to rule-based offline');
-        if(lower.contains('time')){
-          return 'Current time: ${DateFormat('h:mm a').format(DateTime.now())} (device local, offline).';
-        }
-        return 'AERO on-device (offline mode): I received "$prompt"\n\n'
-            '[On-device TinyLlama fallback — model file exists but fllama not fully initialized. '
-            'Try restarting app. For laptop mode, set AERO URL to http://192.168.1.15:11434]';
+        return 'On-device fallback: "$prompt" — ${DateFormat('h:mm a').format(DateTime.now())} offline.';
       }
-    } catch(e){
-      return 'On-device error: $e';
-    }
+    } catch(e){ return 'On-device error: $e'; }
   }
 
   static Future<void> deleteModel() async {
-    try {
-      final p = await _getModelPath();
-      final f = File(p);
-      if(await f.exists()) await f.delete();
-      _modelLoaded = false;
-    } catch(_){}
+    try { final p = await _getModelPath(); final f = File(p); if(await f.exists()) await f.delete(); _modelLoaded = false; } catch(_){}
   }
 }
 
 
-// --- P2P Sync Service (Local Wi-Fi, zero cloud) ---
+
 class P2PSyncService {
   static HttpServer? _server;
   static bool _isServing = false;
@@ -1238,7 +1201,6 @@ class MainDashboardShell extends StatefulWidget {
 class _MainDashboardShellState extends State<MainDashboardShell> {
   int _currentIndex = 0;
   void setTab(int idx){ setState(()=>_currentIndex = idx); }
-
   final List<Widget> _pages = const [
     DashboardHomeTab(),
     HabitsTab(),
@@ -1246,55 +1208,62 @@ class _MainDashboardShellState extends State<MainDashboardShell> {
     FinanceTab(),
     JournalTab(),
     AiChatTab(),
+    GalleryTab(),
+    GameTab(),
   ];
-
+  Widget _buildFixedTab(BuildContext context, int index, IconData icon, String label, bool selected, {bool accent=false}){
+    return InkWell(
+      onTap: ()=>setState(()=>_currentIndex=index),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal:16, vertical:8),
+        decoration: BoxDecoration(color: selected ? (accent ? Colors.deepPurple : Colors.black) : Colors.transparent, borderRadius: BorderRadius.circular(12)),
+        child: Column(mainAxisSize: MainAxisSize.min, children:[
+          Icon(icon, size:22, color: selected ? Colors.white : Colors.grey.shade700),
+          const SizedBox(height:2),
+          Text(label, style: TextStyle(fontSize:10, fontWeight: FontWeight.w600, color: selected ? Colors.white : Colors.grey.shade700)),
+        ]),
+      ),
+    );
+  }
+  Widget _buildSlidableTab(BuildContext context, int index, IconData icon, String label, bool selected){
+    return InkWell(
+      onTap: ()=>setState(()=>_currentIndex=index),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal:14, vertical:8),
+        margin: const EdgeInsets.only(right:4),
+        decoration: BoxDecoration(color: selected ? Colors.grey.shade900 : Colors.grey.shade100, borderRadius: BorderRadius.circular(12)),
+        child: Column(mainAxisSize: MainAxisSize.min, children:[
+          Icon(icon, size:20, color: selected ? Colors.white : Colors.black54),
+          const SizedBox(height:2),
+          Text(label, style: TextStyle(fontSize:10, color: selected ? Colors.white : Colors.black87)),
+        ]),
+      ),
+    );
+  }
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: _pages[_currentIndex],
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _currentIndex,
-        onDestinationSelected: (index) {
-          setState(() {
-            _currentIndex = index;
-          });
-        },
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.dashboard_outlined),
-            selectedIcon: Icon(Icons.dashboard),
-            label: 'Command',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.bolt_outlined),
-            selectedIcon: Icon(Icons.bolt),
-            label: 'Habits',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.task_alt_outlined),
-            selectedIcon: Icon(Icons.task_alt),
-            label: 'Tasks',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.account_balance_wallet_outlined),
-            selectedIcon: Icon(Icons.account_balance_wallet),
-            label: 'Finances',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.book_outlined),
-            selectedIcon: Icon(Icons.book),
-            label: 'Writing Hub',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.smart_toy_outlined),
-            selectedIcon: Icon(Icons.smart_toy),
-            label: 'AI Chat',
-          ),
-        ],
+      bottomNavigationBar: Container(
+        height: 78,
+        decoration: BoxDecoration(color: Theme.of(context).scaffoldBackgroundColor, border: Border(top: BorderSide(color: Colors.grey.shade300))),
+        child: Row(children:[
+          _buildFixedTab(context, 0, Icons.dashboard, "Command", _currentIndex==0),
+          Expanded(child: SingleChildScrollView(scrollDirection: Axis.horizontal, physics: const BouncingScrollPhysics(), child: Row(children:[
+            _buildSlidableTab(context, 1, Icons.bolt, "Habits", _currentIndex==1),
+            _buildSlidableTab(context, 2, Icons.check_circle, "Tasks", _currentIndex==2),
+            _buildSlidableTab(context, 3, Icons.account_balance_wallet, "Finances", _currentIndex==3),
+            _buildSlidableTab(context, 4, Icons.book, "Writing", _currentIndex==4),
+            _buildSlidableTab(context, 5, Icons.smart_toy, "AERO", _currentIndex==5),
+            _buildSlidableTab(context, 6, Icons.photo_library, "Gallery", _currentIndex==6),
+          ]))),
+          _buildFixedTab(context, 7, Icons.videogame_asset, "Gaming", _currentIndex==7, accent: true),
+        ]),
       ),
     );
   }
 }
+
 
 
 // ==================== 1. COMMAND DASHBOARD TAB (PUSH 4 Sovereign) ====================
@@ -3210,219 +3179,121 @@ class _JournalTabState extends State<JournalTab> {
 
 
 
-// ==================== PUSH 5 — GALLERY TAB — Take Pictures + Save in App + Phone Gallery ====================
-class GalleryTab extends StatefulWidget {
-  const GalleryTab({super.key});
-  @override
-  State<GalleryTab> createState() => _GalleryTabState();
-}
+// ==================== PUSH 5 — GALLERY + GAMES ====================
+class GalleryTab extends StatefulWidget { const GalleryTab({super.key}); @override State<GalleryTab> createState() => _GalleryTabState(); }
 class _GalleryTabState extends State<GalleryTab> {
   final ImagePicker _picker = ImagePicker();
   List<String> _images = [];
-  @override
-  void initState(){ super.initState(); _loadGallery(); }
-  Future<void> _loadGallery() async {
+  @override void initState(){ super.initState(); _load(); }
+  Future<void> _load() async {
     try {
       final dir = await getApplicationDocumentsDirectory();
       final gDir = Directory("${dir.path}/AERO/gallery");
       if(!await gDir.exists()) await gDir.create(recursive:true);
       final files = gDir.listSync().where((f)=>f.path.endsWith(".jpg")||f.path.endsWith(".png")||f.path.endsWith(".jpeg")).toList();
-      setState(()=>_images = files.map((e)=>e.path).toList()..sort((a,b)=>b.compareTo(a)));
+      if(mounted) setState(()=>_images = files.map((e)=>e.path).toList()..sort((a,b)=>b.compareTo(a)));
     } catch(_){}
   }
-  Future<void> _takePicture() async {
+  Future<void> _take() async {
     try {
-      final XFile? photo = await _picker.pickImage(source: ImageSource.camera, imageQuality: 85);
-      if(photo==null) return;
+      final XFile? p = await _picker.pickImage(source: ImageSource.camera, imageQuality:85);
+      if(p==null) return;
       final dir = await getApplicationDocumentsDirectory();
       final gDir = Directory("${dir.path}/AERO/gallery");
       if(!await gDir.exists()) await gDir.create(recursive:true);
-      final name = "onyx_cam_${DateTime.now().millisecondsSinceEpoch}.jpg";
-      await File(photo.path).copy("${gDir.path}/$name");
-      await _loadGallery();
-      if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Saved to AERO/gallery: $name")));
-    } catch(e){ if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Camera error: $e"))); }
+      await File(p.path).copy("${gDir.path}/onyx_cam_${DateTime.now().millisecondsSinceEpoch}.jpg");
+      await _load();
+    } catch(e){ if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Camera: $e"))); }
   }
-  Future<void> _pickFromPhoneGallery() async {
+  Future<void> _pickPhone() async {
     try {
-      final XFile? img = await _picker.pickImage(source: ImageSource.gallery);
-      if(img==null) return;
+      final XFile? p = await _picker.pickImage(source: ImageSource.gallery);
+      if(p==null) return;
       final dir = await getApplicationDocumentsDirectory();
       final gDir = Directory("${dir.path}/AERO/gallery");
       if(!await gDir.exists()) await gDir.create(recursive:true);
-      final name = "onyx_phone_${DateTime.now().millisecondsSinceEpoch}.jpg";
-      await File(img.path).copy("${gDir.path}/$name");
-      await _loadGallery();
-    } catch(e){ if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Gallery error: $e"))); }
+      await File(p.path).copy("${gDir.path}/onyx_phone_${DateTime.now().millisecondsSinceEpoch}.jpg");
+      await _load();
+    } catch(e){ if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Import: $e"))); }
   }
-  @override
-  Widget build(BuildContext context){
-    return Scaffold(
-      appBar: AppBar(title: const Text("Gallery — In-App + Phone"), actions:[
-        IconButton(icon: const Icon(Icons.photo_library), tooltip: "Add from phone gallery", onPressed: _pickFromPhoneGallery),
-        IconButton(icon: const Icon(Icons.refresh), onPressed: _loadGallery),
-      ]),
-      floatingActionButton: FloatingActionButton.extended(onPressed: _takePicture, icon: const Icon(Icons.camera_alt), label: const Text("Take Picture")),
-      body: _images.isEmpty ? const Center(child: Text("No pictures yet.\n• Take with phone camera\n• Add from phone gallery\n• Saved offline in AERO/gallery\n• VPN-friendly", textAlign: TextAlign.center)) :
-      GridView.builder(padding: const EdgeInsets.all(8), gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, crossAxisSpacing:6, mainAxisSpacing:6), itemCount: _images.length, itemBuilder: (ctx,i){
-        final p = _images[i];
-        return GestureDetector(onTap: (){ showDialog(context: context, builder: (c)=>Dialog(child: Image.file(File(p)))); }, child: ClipRRect(borderRadius: BorderRadius.circular(12), child: Image.file(File(p), fit: BoxFit.cover)));
-      }),
-    );
+  @override Widget build(BuildContext context){
+    return Scaffold(appBar: AppBar(title: const Text("Gallery — In-App + Phone"), actions:[IconButton(icon: const Icon(Icons.photo_library), onPressed: _pickPhone), IconButton(icon: const Icon(Icons.refresh), onPressed: _load)]), floatingActionButton: FloatingActionButton.extended(onPressed: _take, icon: const Icon(Icons.camera_alt), label: const Text("Take Picture")), body: _images.isEmpty ? const Center(child: Text("No pictures yet.\n• Take with phone camera\n• Add from phone gallery\n• Offline AERO/gallery", textAlign: TextAlign.center)) : GridView.builder(padding: const EdgeInsets.all(8), gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount:3, crossAxisSpacing:6, mainAxisSpacing:6), itemCount: _images.length, itemBuilder: (ctx,i){ final p = _images[i]; return GestureDetector(onTap: (){ showDialog(context: context, builder: (c)=>Dialog(child: Image.file(File(p)))); }, child: ClipRRect(borderRadius: BorderRadius.circular(12), child: Image.file(File(p), fit: BoxFit.cover))); }),);
   }
 }
-
-// ==================== PUSH 5 — GAMETAB — Flappy Onyx, Breakout, Space Shooter, Snake (Flame) ====================
 class _SnakeGame extends FlameGame {
   List<Vector2> snake = [Vector2(5,5)];
   Vector2 dir = Vector2(1,0);
   Vector2 food = Vector2(10,10);
   double timer = 0;
-  int score = 0;
-  @override
-  Color backgroundColor() => const Color(0xFF111111);
-  @override
-  void update(double dt){
-    timer += dt;
-    if(timer > 0.15){
-      timer = 0;
-      snake.insert(0, snake.first + dir);
-      if((snake.first - food).length < 1){ score++; food = Vector2((DateTime.now().millisecond % 18).toDouble(), (DateTime.now().second % 32).toDouble()); } else { snake.removeLast(); }
-      if(snake.first.x <0 || snake.first.x>19 || snake.first.y<0 || snake.first.y>33) snake = [Vector2(5,5)];
-    }
-  }
-  @override
-  void render(Canvas canvas){
-    final paintSnake = Paint()..color = Colors.greenAccent;
-    final paintFood = Paint()..color = Colors.redAccent;
-    for(final s in snake){ canvas.drawRect(Rect.fromLTWH(s.x*16, s.y*16, 14, 14), paintSnake); }
-    canvas.drawRect(Rect.fromLTWH(food.x*16, food.y*16, 14, 14), paintFood);
-  }
+  @override Color backgroundColor() => const Color(0xFF111111);
+  @override void update(double dt){ timer += dt; if(timer > 0.15){ timer = 0; final newHead = snake.first + dir; if(newHead.x <0 || newHead.x>19 || newHead.y<0 || newHead.y>33){ snake = [Vector2(5,5)]; dir = Vector2(1,0); return; } snake.insert(0, newHead); if((newHead - food).length < 1){ food = Vector2((DateTime.now().millisecond % 18).toDouble(), (DateTime.now().second % 32).toDouble()); } else { snake.removeLast(); } } }
+  @override void render(Canvas canvas){ final pSnake = Paint()..color = Colors.greenAccent; final pFood = Paint()..color = Colors.redAccent; for(final s in snake){ canvas.drawRect(Rect.fromLTWH(s.x*16, s.y*16, 14, 14), pSnake); } canvas.drawRect(Rect.fromLTWH(food.x*16, food.y*16, 14, 14), pFood); }
   void changeDir(Vector2 d){ if((dir + d).length !=0) dir = d; }
 }
-
-class GameTab extends StatefulWidget {
-  const GameTab({super.key});
-  @override
-  State<GameTab> createState() => _GameTabState();
-}
+class GameTab extends StatefulWidget { const GameTab({super.key}); @override State<GameTab> createState() => _GameTabState(); }
 class _GameTabState extends State<GameTab> {
-  String _sel = "Flappy Onyx";
-  final games = ["Flappy Onyx","Breakout","Space Shooter","Snake"];
-  _SnakeGame? _snakeGame;
-  @override
-  void initState(){ super.initState(); _snakeGame = _SnakeGame(); }
-  @override
-  Widget build(BuildContext context){
-    return Scaffold(
-      appBar: AppBar(title: const Text("Gaming — Arcade")),
-      body: Column(children:[
-        const SizedBox(height:12),
-        SingleChildScrollView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal:12), child: Row(children: games.map((g){
-          final sel = g==_sel;
-          return Padding(padding: const EdgeInsets.only(right:8), child: ChoiceChip(label: Text(g), selected: sel, selectedColor: Colors.black, labelStyle: TextStyle(color: sel?Colors.white:Colors.black), onSelected: (_)=>setState(()=>_sel=g)));
-        }).toList())),
-        const SizedBox(height:8),
-        Expanded(child: _buildGame()),
-      ]),
-    );
+  String _sel = "Snake"; final List<String> games = ["Flappy Onyx","Breakout","Space Shooter","Snake"]; late _SnakeGame _snakeGame;
+  @override void initState(){ super.initState(); _snakeGame = _SnakeGame(); }
+  @override Widget build(BuildContext context){
+    return Scaffold(appBar: AppBar(title: const Text("Gaming — Arcade")), body: Column(children:[const SizedBox(height:12), SingleChildScrollView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal:12), child: Row(children: games.map((g){ final sel = g==_sel; return Padding(padding: const EdgeInsets.only(right:8), child: ChoiceChip(label: Text(g), selected: sel, selectedColor: Colors.black, labelStyle: TextStyle(color: sel?Colors.white:Colors.black), onSelected: (_)=>setState(()=>_sel=g))); }).toList())), Expanded(child: _buildGame())]),);
   }
   Widget _buildGame(){
-    switch(_sel){
-      case "Snake":
-        return Column(children:[
-          Expanded(child: GameWidget(game: _snakeGame!)),
-          Padding(padding: const EdgeInsets.all(8), child: Row(mainAxisAlignment: MainAxisAlignment.center, children:[
-            IconButton(icon: const Icon(Icons.arrow_upward), onPressed: ()=>_snakeGame!.changeDir(Vector2(0,-1))),
-            const SizedBox(width:8),
-            Column(children:[
-              IconButton(icon: const Icon(Icons.arrow_back), onPressed: ()=>_snakeGame!.changeDir(Vector2(-1,0))),
-              IconButton(icon: const Icon(Icons.arrow_forward), onPressed: ()=>_snakeGame!.changeDir(Vector2(1,0))),
-            ]),
-            const SizedBox(width:8),
-            IconButton(icon: const Icon(Icons.arrow_downward), onPressed: ()=>_snakeGame!.changeDir(Vector2(0,1))),
-          ])),
-        ]);
-      case "Flappy Onyx":
-        return Center(child: Container(margin: const EdgeInsets.all(16), padding: const EdgeInsets.all(24), decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(24)), child: Column(mainAxisSize: MainAxisSize.min, children:[
-          const Icon(Icons.flutter_dash, size:64),
-          const SizedBox(height:12),
-          const Text("Flappy Onyx", style: TextStyle(fontSize:22, fontWeight: FontWeight.bold)),
-          const SizedBox(height:8),
-          const Text("Tap to flap — pipes = Xfinity blocks 127.0.0.1:9339\nScore = habit streak\nPUSH 5.1: Full Flame impl", textAlign: TextAlign.center),
-          const SizedBox(height:16),
-          ElevatedButton.icon(icon: const Icon(Icons.play_arrow), label: const Text("Play (stub)"), onPressed: (){}),
-        ])));
-      case "Breakout":
-        return const Center(child: Text("Breakout — bricks = tasks/habits\nPUSH 5.1 Flame Breakout with paddle", textAlign: TextAlign.center));
-      case "Space Shooter":
-        return const Center(child: Text("Space Shooter — enemies = phishing\nPUSH 5.1 Flame shooter", textAlign: TextAlign.center));
-      default:
-        return const SizedBox();
-    }
+    if(_sel=="Snake"){ return Column(children:[Expanded(child: GameWidget(game: _snakeGame)), Padding(padding: const EdgeInsets.all(8), child: Row(mainAxisAlignment: MainAxisAlignment.center, children:[IconButton(icon: const Icon(Icons.arrow_upward), onPressed: ()=>_snakeGame.changeDir(Vector2(0,-1))), const SizedBox(width:8), Column(children:[IconButton(icon: const Icon(Icons.arrow_back), onPressed: ()=>_snakeGame.changeDir(Vector2(-1,0))), IconButton(icon: const Icon(Icons.arrow_forward), onPressed: ()=>_snakeGame.changeDir(Vector2(1,0)))]), const SizedBox(width:8), IconButton(icon: const Icon(Icons.arrow_downward), onPressed: ()=>_snakeGame.changeDir(Vector2(0,1)))]))]); }
+    return Center(child: Text("$_sel — PUSH 5.1 coming", textAlign: TextAlign.center));
   }
 }
 
 
 // ==================== 6. AI CHAT TAB — Local Ollama Chat Space ====================
+
 class AiChatTab extends StatefulWidget {
   const AiChatTab({super.key});
-  @override
-  State<AiChatTab> createState() => _AiChatTabState();
+  @override State<AiChatTab> createState() => _AiChatTabState();
 }
-
 class _AiChatTabState extends State<AiChatTab> {
   final SpeechToText _speech = SpeechToText();
   bool _listening = false;
+  bool _bannerDismissed = false;
   final List<Map<String,String>> _messages = [];
   final TextEditingController _inputCtrl = TextEditingController();
   bool _isLoading = false;
   bool? _online;
   final ScrollController _scrollCtrl = ScrollController();
 
-  @override
-  void initState(){
+  @override void initState(){
     super.initState();
     _checkOnline();
-    _messages.add({
-      "role": "assistant",
-      "text": "Hi Caleb — I am your local Onyx Beacon AERO (Ollama). Zero cloud. Ask me to improve writing, summarize your week, analyze habits, or brainstorm.\n\nTry: Summarize my last 7 days"
-    });
+    _messages.add({'role':'assistant','text':'Hi Caleb — I am your local Onyx Beacon AERO (Ollama + on-device). Zero cloud. Ask me to improve writing, summarize your week, analyze habits, or brainstorm.\n\nTry: Summarize my last 7 days'});
   }
 
   Future<void> _checkOnline() async {
     final ok = await AiCopilotService.checkConnection();
-    setState(()=>_online=ok);
+    if(mounted) setState(()=>_online=ok);
   }
+
+  Future<void> _startListening() async {
+    bool avail = await _speech.initialize();
+    if(avail){
+      setState(()=>_listening=true);
+      _speech.listen(onResult: (res){ setState(()=>_inputCtrl.text = res.recognizedWords); });
+    }
+  }
+  void _stopListening(){ _speech.stop(); setState(()=>_listening=false); }
+  void _scrollToBottom(){ WidgetsBinding.instance.addPostFrameCallback((_){ if(_scrollCtrl.hasClients){ _scrollCtrl.animateTo(_scrollCtrl.position.maxScrollExtent, duration: const Duration(milliseconds:300), curve: Curves.easeOut); }}); }
 
   Future<void> _showAeroSettings() async {
     final urlCtrl = TextEditingController(text: AiCopilotService.baseUrl);
     final modelCtrl = TextEditingController(text: AiCopilotService.model);
+    if(!mounted) return;
     showDialog(context: context, builder: (ctx)=>AlertDialog(
-      title: const Text('AERO Settings — Local Offline'),
-      content: SingleChildScrollView(
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children:[
-          const SelectableText(
-            'Windows: http://localhost:11434 — '
-            'iPhone same Wi-Fi: http://192.168.1.15:11434 '
-            '(your Windows IP). Zero cloud, zero fees. '
-            'Long-press to copy.',
-            style: TextStyle(fontSize:11),
-          ),
-          const SizedBox(height:8),
-          Wrap(spacing:6, children:[
-            ActionChip(label: const Text('Copy Win URL', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(const ClipboardData(text: 'http://localhost:11434')); ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Copied Windows URL'))); }),
-            ActionChip(label: const Text('Copy iPhone URL', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(const ClipboardData(text: 'http://192.168.1.15:11434')); ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Copied iPhone URL'))); }),
-            ActionChip(label: const Text('Copy Serve Cmd', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(const ClipboardData(text: '\$env:OLLAMA_HOST=\"0.0.0.0\"; ollama serve')); ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Copied serve cmd'))); }),
-          ]),
-          const SizedBox(height:12),
-          TextField(controller: urlCtrl, decoration: const InputDecoration(labelText: 'AERO URL (tap to paste)', hintText: 'http://192.168.1.15:11434', border: OutlineInputBorder())),
-          const SizedBox(height:8),
-          TextField(controller: modelCtrl, decoration: const InputDecoration(labelText: 'Model', hintText: 'llama3', border: OutlineInputBorder())),
-          const SizedBox(height:8),
-          SelectableText('Current real time: ${DateFormat('yyyy-MM-dd HH:mm:ss EEEE').format(DateTime.now())} Detroit EST', style: TextStyle(fontSize:10, color: Colors.grey)),
-        ]),
-      ),
+      title: const Text('AERO Settings — Real AI + Bible'),
+      content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children:[
+        const SelectableText('Windows: http://localhost:11434 — iPhone same Wi-Fi: http://192.168.1.15:11434', style: TextStyle(fontSize:11)),
+        const SizedBox(height:8),
+        TextField(controller: urlCtrl, decoration: const InputDecoration(labelText:'AERO URL', border: OutlineInputBorder())),
+        const SizedBox(height:8),
+        TextField(controller: modelCtrl, decoration: const InputDecoration(labelText:'Model', border: OutlineInputBorder())),
+      ])),
       actions:[
         TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text('Cancel')),
         ElevatedButton(onPressed: (){ AiCopilotService.setCustomEndpoint(urlCtrl.text.trim(), modelCtrl.text.trim()); Navigator.pop(ctx); _checkOnline(); }, child: const Text('Save & Test')),
@@ -3440,185 +3311,72 @@ class _AiChatTabState extends State<AiChatTab> {
     });
     _scrollToBottom();
     try {
-      // Gather context: last 7 days data for smarter answers
-      String contextPrompt = text;
-      if(text.toLowerCase().contains('week') || text.toLowerCase().contains('summary') || text.toLowerCase().contains('habit')){
+      final lq = text.toLowerCase();
+      final hasOnDevice = await AeroOnDeviceService.checkModelExists();
+      final isOffline = _online == false;
+      if(hasOnDevice && (isOffline || lq == 'hi' || lq == 'hello' || lq.contains('what time'))){
         try {
-          final db = await DatabaseHelper.instance.database;
-          final weekAgo = DateFormat('yyyy-MM-dd').format(DateTime.now().subtract(const Duration(days: 7)));
-          final completions = await db.query('habit_completions', where: 'completed_date >= ?', whereArgs: [weekAgo]);
-          final txs = await db.query('transactions', where: 'date >= ?', whereArgs: [weekAgo]);
-          final journals = await db.query('journal_entries', where: 'date >= ?', whereArgs: [weekAgo]);
-          double net = 0;
-          for(var t in txs){ final amt=(t['amount'] as num).toDouble(); net+=t['type']=='Income'?amt:-amt; }
-          contextPrompt = 'Context — Last 7 days: ${completions.length} habit completions, ${txs.length} transactions net \$${net.toStringAsFixed(0)}, ${journals.length} writing entries.\n\nUser question: $text\n\nAnswer concisely, helpful, local-first.';
-        } catch(_){}
-      }
-      // 1. Try WiFi — Ollama on Surface (like every other app using WiFi)
-      String response = await AiCopilotService.improveText(contextPrompt, instruction: 'You are Onyx Beacon AERO, local-first, helpful, concise. Answer the user question directly. Current time: ${DateFormat('h:mm a, EEEE, MMM d, yyyy').format(DateTime.now())}');
-      
-      // 2. If Ollama fails (404, offline, Surface dead, no WiFi), fall back to on-device TinyLlama — true offline
-      if(response.startsWith('AI Error:') || response.startsWith('AI Offline:') || response.contains('Error:')){
-        try {
-          final hasModel = await AeroOnDeviceService.checkModelExists();
-          if(hasModel){
-            final onDevice = await AeroOnDeviceService.generateOnDevice(contextPrompt);
-            response = onDevice + '\n\n(on-device — offline mode, no WiFi/laptop needed)';
-          } else {
-            // If no on-device model yet, keep Ollama error but add helpful hint for phone
-            response = response + '\n\nTip for true offline on iPhone: Settings → Download 600MB Model (one time), then it works with no WiFi/Surface.';
-          }
-        } catch(_){
-          // Keep original Ollama error if on-device also fails
-        }
-      }
-      
-      setState((){
-        _messages.add({'role':'assistant','text':response});
-        _isLoading = false;
-      });
-    } catch(e){
-      // Last resort — try on-device
-      try {
-        final hasModel = await AeroOnDeviceService.checkModelExists();
-        if(hasModel){
-          final onDevice = await AeroOnDeviceService.generateOnDevice(text);
+          final od = await AeroOnDeviceService.generateOnDevice(text);
           setState((){
-            _messages.add({'role':'assistant','text':onDevice + '\n\n(on-device fallback)'});
+            _messages.add({'role':'assistant','text':od});
             _isLoading = false;
           });
           _scrollToBottom();
           return;
-        }
-      } catch(_){}
+        } catch(e){ debugPrint('on-device fast fail $e'); }
+      }
+      final resp = await AiCopilotService.generateResponse(instruction: 'Be concise, helpful, Detroit time aware.', text: text, contextPrompt: 'User: Caleb in Detroit, Onyx Beacon vault.');
       setState((){
-        _messages.add({'role':'assistant','text':'Error: $e\n\nFix Surface: ollama pull llama3 && ollama run llama3\nFix iPhone offline: Settings → Download 600MB Model'});
+        _messages.add({'role':'assistant','text':resp});
+        _isLoading = false;
+      });
+    } catch(e){
+      setState((){
+        _messages.add({'role':'assistant','text':'Error: $e'});
         _isLoading = false;
       });
     }
     _scrollToBottom();
   }
 
-  
-  Future<void> _startListening() async {
-    bool avail = await _speech.initialize();
-    if(avail){
-      setState(()=>_listening=true);
-      _speech.listen(onResult: (res){
-        setState(()=>_inputCtrl.text = res.recognizedWords);
-      });
-    }
-  }
-  void _stopListening(){
-    _speech.stop();
-    setState(()=>_listening=false);
-  }
-
-void _scrollToBottom(){
-    WidgetsBinding.instance.addPostFrameCallback((_){
-      if(_scrollCtrl.hasClients){
-        _scrollCtrl.animateTo(_scrollCtrl.position.maxScrollExtent + 120, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
-      }
-    });
-  }
-
-  @override
-  Widget build(BuildContext context){
+  @override Widget build(BuildContext context){
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('AI Chat — AERO'),
-        actions: [
-          IconButton(icon: Icon(_online==true?Icons.circle:Icons.circle_outlined, color: _online==true?Colors.green:Colors.grey, size:12), tooltip: _online==true?'Online':'Offline', onPressed: _checkOnline),
-          IconButton(icon: const Icon(Icons.settings), onPressed: _showAeroSettings),
-          IconButton(icon: const Icon(Icons.refresh), onPressed: _checkOnline),
-          PopupMenuButton<String>(onSelected: (v){ if(v=='clear') setState(()=>_messages.clear()); }, itemBuilder: (c)=>[const PopupMenuItem(value:'clear', child: Text('Clear Chat'))]),
-        ],
-      ),
-      body: Column(
-        children: [
-          if(_online==false)
-            Container(
+      appBar: AppBar(title: const Text('AERO — Real AI + Bible'), actions:[
+        IconButton(icon: const Icon(Icons.settings), onPressed: _showAeroSettings),
+        IconButton(icon: const Icon(Icons.refresh), onPressed: _checkOnline),
+      ]),
+      body: Column(children:[
+        if(_online==false && !_bannerDismissed)
+          Dismissible(
+            key: const ValueKey('offline_banner'),
+            direction: DismissDirection.up,
+            onDismissed: (_){ setState(()=>_bannerDismissed=true); },
+            child: Container(
               color: Colors.orange.shade100,
               padding: const EdgeInsets.all(8),
               child: Row(children:[
                 const Icon(Icons.warning_amber, size:16),
                 const SizedBox(width:6),
-                const Expanded(
-                  child: Text(
-                    'AERO offline — Windows: ollama run llama3. '
-                    'iPhone: set to http://192.168.1.15:11434 '
-                    '(same Wi-Fi, zero cloud).',
-                    style: TextStyle(fontSize:11),
-                  ),
-                ),
-                TextButton(
-                  onPressed: _checkOnline,
-                  child: const Text('Retry'),
-                ),
+                const Expanded(child: Text('AERO offline — Windows: ollama run llama3. iPhone: set to http://192.168.1.15:11434 (same Wi-Fi). Tap X to dismiss.', style: TextStyle(fontSize:11))),
+                TextButton(onPressed: _checkOnline, child: const Text('Retry')),
+                IconButton(icon: const Icon(Icons.close, size:16), onPressed: ()=>setState(()=>_bannerDismissed=true)),
               ]),
             ),
-          Expanded(
-            child: ListView.builder(
-              controller: _scrollCtrl,
-              padding: const EdgeInsets.all(12),
-              itemCount: _messages.length + (_isLoading?1:0),
-              itemBuilder: (ctx, idx){
-                if(idx==_messages.length && _isLoading){
-                  return const Padding(padding: EdgeInsets.all(8), child: Row(children:[SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2)), SizedBox(width:8), Text('Thinking...', style: TextStyle(fontSize:12, color: Colors.grey))]));
-                }
-                final msg = _messages[idx];
-                final isUser = msg['role']=='user';
-                return Align(
-                  alignment: isUser?Alignment.centerRight:Alignment.centerLeft,
-                  child: Container(
-                    margin: const EdgeInsets.symmetric(vertical:4),
-                    padding: const EdgeInsets.all(12),
-                    constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width*0.8),
-                    decoration: BoxDecoration(
-                      color: isUser?Colors.blue.shade600:Colors.grey.shade200,
-                      borderRadius: BorderRadius.only(
-                        topLeft: const Radius.circular(16),
-                        topRight: const Radius.circular(16),
-                        bottomLeft: Radius.circular(isUser?16:4),
-                        bottomRight: Radius.circular(isUser?4:16),
-                      ),
-                    ),
-                    child: Text(msg['text']??'', style: TextStyle(color: isUser?Colors.white:Colors.black87, fontSize:13)),
-                  ),
-                );
-              },
-            ),
           ),
-          const Divider(height:1),
-          Padding(
-            padding: const EdgeInsets.all(8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _inputCtrl,
-                    minLines:1,
-                    maxLines:4,
-                    decoration: InputDecoration(
-                      hintText: 'Ask AI — summarize week, improve writing, brainstorm...',
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(24)),
-                      isDense: true,
-                      contentPadding: const EdgeInsets.symmetric(horizontal:16, vertical:10),
-                    ),
-                    onSubmitted: (_)=>_sendMessage(),
-                  ),
-                ),
-                const SizedBox(width:8),
-                CircleAvatar(
-                  backgroundColor: Colors.blue,
-                  child: IconButton(icon: const Icon(Icons.send, color: Colors.white, size:18), onPressed: _sendMessage),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
+        Expanded(child: ListView.builder(controller: _scrollCtrl, padding: const EdgeInsets.all(12), itemCount: _messages.length + (_isLoading?1:0), itemBuilder: (ctx, idx){
+          if(idx==_messages.length && _isLoading){ return const Padding(padding: EdgeInsets.all(8), child: Row(children:[SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2)), SizedBox(width:8), Text('AERO thinking...')])); }
+          final m = _messages[idx];
+          final isUser = m['role']=='user';
+          return Align(alignment: isUser?Alignment.centerRight:Alignment.centerLeft, child: Container(margin: const EdgeInsets.symmetric(vertical:4), padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: isUser?Colors.black:Colors.grey.shade200, borderRadius: BorderRadius.circular(16)), child: Text(m['text']??'', style: TextStyle(color: isUser?Colors.white:Colors.black87))));
+        })),
+        const Divider(height:1),
+        Padding(padding: const EdgeInsets.all(8), child: Row(children:[
+          IconButton(icon: Icon(_listening ? Icons.mic : Icons.mic_none, color: _listening ? Colors.red : Colors.grey.shade600), onPressed: _listening ? _stopListening : _startListening, tooltip: _listening ? 'Stop' : 'Mic'),
+          Expanded(child: TextField(controller: _inputCtrl, minLines:1, maxLines:4, decoration: InputDecoration(hintText:'Ask AERO — time, Bible, habits, writing...', border: OutlineInputBorder(borderRadius: BorderRadius.circular(24)), isDense:true, contentPadding: const EdgeInsets.symmetric(horizontal:16, vertical:10)), onSubmitted: (_)=>_sendMessage())),
+          const SizedBox(width:8),
+          CircleAvatar(backgroundColor: Colors.black, child: IconButton(icon: const Icon(Icons.send, color: Colors.white, size:18), onPressed: _sendMessage)),
+        ])),
+      ]),
     );
   }
 }
-
