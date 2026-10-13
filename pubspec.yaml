@@ -53,10 +53,10 @@ dependencies:
   http: ^1.2.2
   pdf: ^3.11.1
   printing: ^5.12.0
-  # PUSH 5 — Mic + Gallery + Games (Flappy, Breakout, Shooter, Snake) - Windows build fixed
+  # PUSH 5 — Mic + Gallery + Games (Flappy, Breakout, Shooter) — Windows + iPhone IPA validated
   image_picker: ^1.1.2
   speech_to_text: ^6.6.2
-  flame: 1.38.2
+  flame: ^1.32.0
   flame_audio: 2.12.2
   audioplayers: 6.8.1
   # PUSH 4 Sovereign — True Phone Offline AERO (on-device TinyLlama) — FINAL

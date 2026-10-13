@@ -18,6 +18,14 @@
 	<string>onyx_beacon</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+    <string>Onyx Beacon uses speech to text for AERO chat</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Onyx Beacon needs mic for voice input</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Onyx Beacon camera for gallery</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>Import photos to Onyx gallery</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(FLUTTER_BUILD_NAME)</string>
 	<key>CFBundleSignature</key>
