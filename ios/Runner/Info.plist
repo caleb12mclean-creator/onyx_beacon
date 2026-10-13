@@ -18,14 +18,6 @@
 	<string>onyx_beacon</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
-	<key>NSSpeechRecognitionUsageDescription</key>
-    <string>Onyx Beacon uses speech to text for AERO chat</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Onyx Beacon needs mic for voice input</string>
-    <key>NSCameraUsageDescription</key>
-    <string>Onyx Beacon camera for gallery</string>
-    <key>NSPhotoLibraryUsageDescription</key>
-    <string>Import photos to Onyx gallery</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(FLUTTER_BUILD_NAME)</string>
 	<key>CFBundleSignature</key>
@@ -34,6 +26,16 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Onyx Beacon camera for gallery - take pictures inside app for offline vault</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Onyx Beacon needs mic for voice input for AERO chat and journal - local speech to text</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Import photos to Onyx gallery - add from phone gallery to offline vault</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Save pictures to Onyx gallery - store camera photos in app vault</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Onyx Beacon uses speech to text for AERO chat - local on-device transcription, zero cloud</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
