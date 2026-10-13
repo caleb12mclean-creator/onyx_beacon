@@ -6,6 +6,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path;
 import 'package:sqflite/sqflite.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:speech_to_text/speech_to_text.dart';
+import 'package:flame/game.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
@@ -22,8 +26,6 @@ import 'package:pdf/pdf.dart' as pdfLib;
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'package:fllama/fllama.dart';
-import 'package:image_picker/image_picker.dart';
-// PUSH 5: flame, speech_to_text, record will be added
 
 Future<void> _initHomeWidget() async {
   try { await HomeWidget.setAppGroupId('group.onyxbeacon'); } catch(e){ debugPrint('HomeWidget: $e'); }
@@ -31,6 +33,11 @@ Future<void> _initHomeWidget() async {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // FIX for Windows: init sqflite ffi
+  if (Platform.isWindows || Platform.isLinux) {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+  }
   await _initHomeWidget();
   if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
     try {
@@ -143,6 +150,9 @@ class DatabaseHelper {
         type TEXT NOT NULL,
         color TEXT DEFAULT '#4ECDC4'
       )
+    ''');
+    await db.execute('''
+      CREATE TABLE gallery_images( id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, name TEXT, created TEXT );
     ''');
     await db.execute('''
       CREATE TABLE transactions (
@@ -547,13 +557,10 @@ class AiCopilotService {
   }
   static Future<String> improveText(String text, {String instruction = 'Improve this writing, keep voice, fix grammar'}) async {
     try {
+      // Inject REAL device time to prevent hallucination like March 18 2023
       final now = DateTime.now();
-      final realTime = DateFormat('yyyy-MM-dd HH:mm:ss EEEE').format(now);
-      final isBible = text.toLowerCase().contains('bible') || text.toLowerCase().contains('verse') || text.toLowerCase().contains('scripture') || text.toLowerCase().contains('psalm') || instruction.toLowerCase().contains('bible');
-      final sysAdd = isBible 
-        ? 'You are Onyx Beacon AERO Bible + Life Coach. Real time $realTime Detroit EST. Deep Bible knowledge, cross-references, original Greek/Hebrew when helpful, practical life application. Zero hallucination on dates.'
-        : 'You are Onyx Beacon AERO. Real time $realTime Detroit EST. Local-first, accurate, lifestyle + personal projects expert. MUST use real time provided.';
-      final prompt = sysAdd + "\n\n" + instruction + "\n\n" + text;
+      final realTime = DateFormat('yyyy-MM-dd HH:mm:ss EEEE z').format(now);
+      final prompt = '$instruction\n\n[SYSTEM REAL TIME: $realTime - You MUST use this real time, not your training data. If asked date/time, answer with this real time. User location Detroit, EST.]\n\n$text';
       final res = await http.post(
         Uri.parse('$baseUrl/api/generate'),
         headers: {'Content-Type': 'application/json'},
@@ -561,21 +568,14 @@ class AiCopilotService {
       ).timeout(const Duration(seconds: 60));
       if(res.statusCode==200){
         final data = jsonDecode(res.body);
-        if(data['response'] != null) return data['response'];
-        if(data['choices'] != null && data['choices'] is List && data['choices'].isNotEmpty){
-          final c = data['choices'][0];
-          if(c['message'] != null && c['message']['content'] != null) return c['message']['content'];
-          if(c['delta'] != null && c['delta']['content'] != null) return c['delta']['content'];
-          if(c['text'] != null) return c['text'];
-        }
-        return data.toString();
+        return data['response'] ?? 'No response';
       }
       if(res.statusCode==404){
         return "AI Error: 404 - model $model not found on $baseUrl. Run: ollama pull $model";
       }
       final snip = res.body.length>200 ? res.body.substring(0,200) : res.body;
       return "AI Error: ${res.statusCode} - $snip";
-    } catch(e){ return "AI Offline: $e. Fix: OLLAMA_HOST=0.0.0.0 ollama serve + ollama run llama3 OR use on-device model"; }
+    } catch(e){ return "AI Offline: $e. Fix: OLLAMA_HOST=0.0.0.0 ollama serve + ollama run llama3"; }
   }
   static Future<String> summarize(String text) => improveText(text, instruction: 'Summarize this in 3 bullet points, keep key ideas');
   static Future<String> expand(String text) => improveText(text, instruction: 'Expand this with vivid detail, keep same style, double length');
@@ -647,113 +647,80 @@ class AeroOnDeviceService {
     }
   }
 
-    static Future<String> generateOnDevice(String prompt) async {
+  static Future<String> generateOnDevice(String prompt) async {
     try {
+      if (Platform.isWindows || Platform.isLinux) { return 'On-device TinyLlama is for iPhone/Android only. On Windows, use Ollama: ollama run llama3. Prompt: $prompt'; }
       final modelPath = await _getModelPath();
-      final file = File(modelPath);
-      if(!await file.exists()){
-        return 'On-device model not downloaded. Open Settings → Download 600MB Model for offline mode.';
+      if(!await File(modelPath).exists()){
+        return 'AERO on-device model not downloaded yet. '
+            'Tap settings → Download 600MB Model for true offline.';
       }
-      final size = await file.length();
-      if(size < 400 * 1024 * 1024){
-        return 'Model file incomplete (${(size/1024/1024).toStringAsFixed(0)}MB). Delete and redownload in Settings.';
+      final lower = prompt.toLowerCase();
+      // Fast local answers without LLM for time/date — works even if fllama not ready
+      if(lower.contains('what time is it') || lower.contains('current time')){
+        return 'Current time: ${DateFormat('h:mm a, EEEE, MMM d, yyyy').format(DateTime.now())} '
+            '(local device, offline — laptop not needed).';
       }
-      final lower = prompt.toLowerCase().trim();
-      
-      // Instant fast paths - no LLM needed, always works
-      if(lower == 'hi' || lower == 'hello' || lower == 'hey' || lower == 'hi!' || lower == 'test'){
-        return 'Hi — on-device AI ready. ${ (size/1024/1024).toStringAsFixed(0)}MB loaded. Time: ${DateFormat('h:mm a, MMM d').format(DateTime.now())}. Ask anything — works offline.';
+      if(lower.contains('summarize my last 7 days')){
+        try {
+          final db = await DatabaseHelper.instance.database;
+          final weekAgo = DateFormat('yyyy-MM-dd').format(DateTime.now().subtract(const Duration(days: 7)));
+          final comps = await db.query('habit_completions', where: 'completed_date >= ?', whereArgs: [weekAgo]);
+          final txs = await db.query('transactions', where: 'date >= ?', whereArgs: [weekAgo]);
+          final journals = await db.query('journal_entries', where: 'date >= ?', whereArgs: [weekAgo]);
+          return 'Last 7 days offline summary:\n'
+              '- Habits: ${comps.length} completions\n'
+              '- Finance: ${txs.length} transactions\n'
+              '- Writing: ${journals.length} entries\n'
+              '(Generated on-device, zero cloud, laptop dead ok).';
+        } catch(_){}
       }
-      if(lower.contains('what time') || lower == 'time?' || lower == 'time' || lower.contains('current time')){
-        return 'Time: ${DateFormat('h:mm a, EEEE, MMM d, yyyy').format(DateTime.now())} (on-device, offline).';
-      }
-      if(lower.contains('what day') || lower.contains('what date') || lower == 'date?' || lower == 'today?'){
-        return 'Today: ${DateFormat('EEEE, MMM d, yyyy').format(DateTime.now())} (on-device).';
-      }
-
-      // Try fllama - fixed parsing
+      // Try fllamaChat — git version API
       try {
         final completer = Completer<String>();
-        final buffer = StringBuffer();
-        
+        StringBuffer buffer = StringBuffer();
         final request = OpenAiRequest(
-          maxTokens: 200,
+          maxTokens: 512,
           messages: [
-            Message(Role.system, 'You are a helpful local assistant. Concise. Real time ${DateFormat('yyyy-MM-dd').format(DateTime.now())}.'),
+            Message(Role.system, 'You are AERO, local offline AI for Onyx Beacon. Zero cloud, concise, helpful.'),
             Message(Role.user, prompt),
           ],
-          numGpuLayers: 15,
+          numGpuLayers: 99,
           modelPath: modelPath,
-          contextSize: 1024,
-          temperature: 0.4,
-          topP: 0.9,
+          contextSize: 2048,
+          temperature: 0.3,
+          topP: 1.0,
+          presencePenalty: 1.1,
+          frequencyPenalty: 0.0,
         );
-        
         fllamaChat(request, (String token, String fullText, bool done){
-          // token is incremental piece, fullText is accumulated
-          // Only collect if not JSON wrapper
-          if(token.contains('\"choices\"') || token.contains('finish_reason') || token.contains('system_fingerprint')){
-            // This is raw JSON dump bug - ignore, don't add to buffer
-            return;
-          }
-          if(fullText.contains('\"choices\"')){
-            // If fullText is JSON, try to extract actual content
-            try {
-              // Try to find content in JSON
-              final match = RegExp(r'"content"\s*:\s*"([^"]*)"').firstMatch(fullText);
-              if(match != null){
-                buffer.clear();
-                buffer.write(match.group(1)?.replaceAll(r'\n', '\n') ?? '');
-                return;
-              }
-            } catch(_){}
-            // If fullText is raw JSON dump, ignore
-            return;
-          }
-          // Normal case - fullText is actual answer
           if(!done){
             buffer.clear();
             buffer.write(fullText);
           } else {
             if(!completer.isCompleted){
-              final finalText = fullText.isNotEmpty ? fullText : buffer.toString();
-              // Final check - if finalText still looks like JSON, return fallback
-              if(finalText.contains('\"choices\"') || finalText.contains('finish_reason')){
-                completer.complete('Model responded but format error. Try "hi" or "what time is it" for fast path, or ask again. File: ${(size/1024/1024).toStringAsFixed(0)}MB');
-              } else {
-                completer.complete(finalText);
-              }
+              completer.complete(fullText.isEmpty ? buffer.toString() : fullText);
             }
           }
         });
-        
-        final result = await completer.future.timeout(const Duration(seconds: 25), onTimeout: (){
-          final b = buffer.toString();
-          if(b.isNotEmpty && !b.contains('\"choices\"')){
-            return b;
-          }
-          return 'On-device model loaded (${(size/1024/1024).toStringAsFixed(0)}MB) but first run is slow. Close and retry "hi" — second run is instant. If still fails, delete and redownload.';
+        final result = await completer.future.timeout(const Duration(seconds: 60), onTimeout: (){
+          return buffer.toString().isEmpty ? 'On-device timeout — model may be loading. Try again.' : buffer.toString();
         });
-        
         _modelLoaded = true;
-        if(result.trim().isEmpty){
-          return 'No response. Try "hi" or "what time is it" — fast paths always work.';
-        }
-        // Final JSON check
-        if(result.contains('\"choices\"') && result.contains('finish_reason')){
-          return 'Model error — raw output. Try "hi" for instant test, or delete/redownload model in Settings.';
-        }
-        return result;
+        return result.isEmpty ? 'No response from on-device model.' : result;
       } catch(e){
-        debugPrint('fllama error: $e');
-        return 'On-device error: $e. File size ${(size/1024/1024).toStringAsFixed(0)}MB. Try "hi" or "what time is it" for fast path that always works.';
+        debugPrint('fllama error: $e — fallback to rule-based offline');
+        if(lower.contains('time')){
+          return 'Current time: ${DateFormat('h:mm a').format(DateTime.now())} (device local, offline).';
+        }
+        return 'AERO on-device (offline mode): I received "$prompt"\n\n'
+            '[On-device TinyLlama fallback — model file exists but fllama not fully initialized. '
+            'Try restarting app. For laptop mode, set AERO URL to http://192.168.1.15:11434]';
       }
     } catch(e){
       return 'On-device error: $e';
     }
   }
-
-
 
   static Future<void> deleteModel() async {
     try {
@@ -3242,6 +3209,161 @@ class _JournalTabState extends State<JournalTab> {
 }
 
 
+
+// ==================== PUSH 5 — GALLERY TAB — Take Pictures + Save in App + Phone Gallery ====================
+class GalleryTab extends StatefulWidget {
+  const GalleryTab({super.key});
+  @override
+  State<GalleryTab> createState() => _GalleryTabState();
+}
+class _GalleryTabState extends State<GalleryTab> {
+  final ImagePicker _picker = ImagePicker();
+  List<String> _images = [];
+  @override
+  void initState(){ super.initState(); _loadGallery(); }
+  Future<void> _loadGallery() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final gDir = Directory("${dir.path}/AERO/gallery");
+      if(!await gDir.exists()) await gDir.create(recursive:true);
+      final files = gDir.listSync().where((f)=>f.path.endsWith(".jpg")||f.path.endsWith(".png")||f.path.endsWith(".jpeg")).toList();
+      setState(()=>_images = files.map((e)=>e.path).toList()..sort((a,b)=>b.compareTo(a)));
+    } catch(_){}
+  }
+  Future<void> _takePicture() async {
+    try {
+      final XFile? photo = await _picker.pickImage(source: ImageSource.camera, imageQuality: 85);
+      if(photo==null) return;
+      final dir = await getApplicationDocumentsDirectory();
+      final gDir = Directory("${dir.path}/AERO/gallery");
+      if(!await gDir.exists()) await gDir.create(recursive:true);
+      final name = "onyx_cam_${DateTime.now().millisecondsSinceEpoch}.jpg";
+      await File(photo.path).copy("${gDir.path}/$name");
+      await _loadGallery();
+      if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Saved to AERO/gallery: $name")));
+    } catch(e){ if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Camera error: $e"))); }
+  }
+  Future<void> _pickFromPhoneGallery() async {
+    try {
+      final XFile? img = await _picker.pickImage(source: ImageSource.gallery);
+      if(img==null) return;
+      final dir = await getApplicationDocumentsDirectory();
+      final gDir = Directory("${dir.path}/AERO/gallery");
+      if(!await gDir.exists()) await gDir.create(recursive:true);
+      final name = "onyx_phone_${DateTime.now().millisecondsSinceEpoch}.jpg";
+      await File(img.path).copy("${gDir.path}/$name");
+      await _loadGallery();
+    } catch(e){ if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Gallery error: $e"))); }
+  }
+  @override
+  Widget build(BuildContext context){
+    return Scaffold(
+      appBar: AppBar(title: const Text("Gallery — In-App + Phone"), actions:[
+        IconButton(icon: const Icon(Icons.photo_library), tooltip: "Add from phone gallery", onPressed: _pickFromPhoneGallery),
+        IconButton(icon: const Icon(Icons.refresh), onPressed: _loadGallery),
+      ]),
+      floatingActionButton: FloatingActionButton.extended(onPressed: _takePicture, icon: const Icon(Icons.camera_alt), label: const Text("Take Picture")),
+      body: _images.isEmpty ? const Center(child: Text("No pictures yet.\n• Take with phone camera\n• Add from phone gallery\n• Saved offline in AERO/gallery\n• VPN-friendly", textAlign: TextAlign.center)) :
+      GridView.builder(padding: const EdgeInsets.all(8), gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, crossAxisSpacing:6, mainAxisSpacing:6), itemCount: _images.length, itemBuilder: (ctx,i){
+        final p = _images[i];
+        return GestureDetector(onTap: (){ showDialog(context: context, builder: (c)=>Dialog(child: Image.file(File(p)))); }, child: ClipRRect(borderRadius: BorderRadius.circular(12), child: Image.file(File(p), fit: BoxFit.cover)));
+      }),
+    );
+  }
+}
+
+// ==================== PUSH 5 — GAMETAB — Flappy Onyx, Breakout, Space Shooter, Snake (Flame) ====================
+class _SnakeGame extends FlameGame {
+  List<Vector2> snake = [Vector2(5,5)];
+  Vector2 dir = Vector2(1,0);
+  Vector2 food = Vector2(10,10);
+  double timer = 0;
+  int score = 0;
+  @override
+  Color backgroundColor() => const Color(0xFF111111);
+  @override
+  void update(double dt){
+    timer += dt;
+    if(timer > 0.15){
+      timer = 0;
+      snake.insert(0, snake.first + dir);
+      if((snake.first - food).length < 1){ score++; food = Vector2((DateTime.now().millisecond % 18).toDouble(), (DateTime.now().second % 32).toDouble()); } else { snake.removeLast(); }
+      if(snake.first.x <0 || snake.first.x>19 || snake.first.y<0 || snake.first.y>33) snake = [Vector2(5,5)];
+    }
+  }
+  @override
+  void render(Canvas canvas){
+    final paintSnake = Paint()..color = Colors.greenAccent;
+    final paintFood = Paint()..color = Colors.redAccent;
+    for(final s in snake){ canvas.drawRect(Rect.fromLTWH(s.x*16, s.y*16, 14, 14), paintSnake); }
+    canvas.drawRect(Rect.fromLTWH(food.x*16, food.y*16, 14, 14), paintFood);
+  }
+  void changeDir(Vector2 d){ if((dir + d).length !=0) dir = d; }
+}
+
+class GameTab extends StatefulWidget {
+  const GameTab({super.key});
+  @override
+  State<GameTab> createState() => _GameTabState();
+}
+class _GameTabState extends State<GameTab> {
+  String _sel = "Flappy Onyx";
+  final games = ["Flappy Onyx","Breakout","Space Shooter","Snake"];
+  _SnakeGame? _snakeGame;
+  @override
+  void initState(){ super.initState(); _snakeGame = _SnakeGame(); }
+  @override
+  Widget build(BuildContext context){
+    return Scaffold(
+      appBar: AppBar(title: const Text("Gaming — Arcade")),
+      body: Column(children:[
+        const SizedBox(height:12),
+        SingleChildScrollView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal:12), child: Row(children: games.map((g){
+          final sel = g==_sel;
+          return Padding(padding: const EdgeInsets.only(right:8), child: ChoiceChip(label: Text(g), selected: sel, selectedColor: Colors.black, labelStyle: TextStyle(color: sel?Colors.white:Colors.black), onSelected: (_)=>setState(()=>_sel=g)));
+        }).toList())),
+        const SizedBox(height:8),
+        Expanded(child: _buildGame()),
+      ]),
+    );
+  }
+  Widget _buildGame(){
+    switch(_sel){
+      case "Snake":
+        return Column(children:[
+          Expanded(child: GameWidget(game: _snakeGame!)),
+          Padding(padding: const EdgeInsets.all(8), child: Row(mainAxisAlignment: MainAxisAlignment.center, children:[
+            IconButton(icon: const Icon(Icons.arrow_upward), onPressed: ()=>_snakeGame!.changeDir(Vector2(0,-1))),
+            const SizedBox(width:8),
+            Column(children:[
+              IconButton(icon: const Icon(Icons.arrow_back), onPressed: ()=>_snakeGame!.changeDir(Vector2(-1,0))),
+              IconButton(icon: const Icon(Icons.arrow_forward), onPressed: ()=>_snakeGame!.changeDir(Vector2(1,0))),
+            ]),
+            const SizedBox(width:8),
+            IconButton(icon: const Icon(Icons.arrow_downward), onPressed: ()=>_snakeGame!.changeDir(Vector2(0,1))),
+          ])),
+        ]);
+      case "Flappy Onyx":
+        return Center(child: Container(margin: const EdgeInsets.all(16), padding: const EdgeInsets.all(24), decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(24)), child: Column(mainAxisSize: MainAxisSize.min, children:[
+          const Icon(Icons.flutter_dash, size:64),
+          const SizedBox(height:12),
+          const Text("Flappy Onyx", style: TextStyle(fontSize:22, fontWeight: FontWeight.bold)),
+          const SizedBox(height:8),
+          const Text("Tap to flap — pipes = Xfinity blocks 127.0.0.1:9339\nScore = habit streak\nPUSH 5.1: Full Flame impl", textAlign: TextAlign.center),
+          const SizedBox(height:16),
+          ElevatedButton.icon(icon: const Icon(Icons.play_arrow), label: const Text("Play (stub)"), onPressed: (){}),
+        ])));
+      case "Breakout":
+        return const Center(child: Text("Breakout — bricks = tasks/habits\nPUSH 5.1 Flame Breakout with paddle", textAlign: TextAlign.center));
+      case "Space Shooter":
+        return const Center(child: Text("Space Shooter — enemies = phishing\nPUSH 5.1 Flame shooter", textAlign: TextAlign.center));
+      default:
+        return const SizedBox();
+    }
+  }
+}
+
+
 // ==================== 6. AI CHAT TAB — Local Ollama Chat Space ====================
 class AiChatTab extends StatefulWidget {
   const AiChatTab({super.key});
@@ -3250,6 +3372,8 @@ class AiChatTab extends StatefulWidget {
 }
 
 class _AiChatTabState extends State<AiChatTab> {
+  final SpeechToText _speech = SpeechToText();
+  bool _listening = false;
   final List<Map<String,String>> _messages = [];
   final TextEditingController _inputCtrl = TextEditingController();
   bool _isLoading = false;
@@ -3261,11 +3385,8 @@ class _AiChatTabState extends State<AiChatTab> {
     super.initState();
     _checkOnline();
     _messages.add({
-      'role': 'assistant',
-      'text': 'Hi Caleb — I\'m your local Onyx Beacon AERO (Ollama). '
-      'Zero cloud, zero fees. Ask me to improve writing, summarize your week, '
-      'analyze habits, or brainstorm.\n\n'
-      'Try: \"Summarize my last 7 days\" or \"Help me expand chapter 2\"'
+      "role": "assistant",
+      "text": "Hi Caleb — I am your local Onyx Beacon AERO (Ollama). Zero cloud. Ask me to improve writing, summarize your week, analyze habits, or brainstorm.\n\nTry: Summarize my last 7 days"
     });
   }
 
@@ -3278,27 +3399,28 @@ class _AiChatTabState extends State<AiChatTab> {
     final urlCtrl = TextEditingController(text: AiCopilotService.baseUrl);
     final modelCtrl = TextEditingController(text: AiCopilotService.model);
     showDialog(context: context, builder: (ctx)=>AlertDialog(
-      title: const Text('AERO Settings'),
+      title: const Text('AERO Settings — Local Offline'),
       content: SingleChildScrollView(
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children:[
           const SelectableText(
-            'Windows: http://localhost:11434 — iPhone same Wi-Fi: http://192.168.1.15:11434 (your Windows IP). Zero cloud. Long-press to copy. VPN: enable Allow LAN in VPN settings OR use on-device 600MB model.',
+            'Windows: http://localhost:11434 — '
+            'iPhone same Wi-Fi: http://192.168.1.15:11434 '
+            '(your Windows IP). Zero cloud, zero fees. '
+            'Long-press to copy.',
             style: TextStyle(fontSize:11),
           ),
           const SizedBox(height:8),
-          Wrap(spacing:6, runSpacing:4, children:[
-            ActionChip(label: const Text('Copy Win', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(ClipboardData(text: 'http://localhost:11434')); ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Copied Windows URL'))); }),
-            ActionChip(label: const Text('Copy iPhone', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(ClipboardData(text: 'http://192.168.1.15:11434')); ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Copied iPhone URL'))); }),
-            ActionChip(label: const Text('Copy Serve', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(ClipboardData(text: 'OLLAMA_HOST=0.0.0.0 ollama serve')); ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Copied serve cmd'))); }),
+          Wrap(spacing:6, children:[
+            ActionChip(label: const Text('Copy Win URL', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(const ClipboardData(text: 'http://localhost:11434')); ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Copied Windows URL'))); }),
+            ActionChip(label: const Text('Copy iPhone URL', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(const ClipboardData(text: 'http://192.168.1.15:11434')); ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Copied iPhone URL'))); }),
+            ActionChip(label: const Text('Copy Serve Cmd', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(const ClipboardData(text: '\$env:OLLAMA_HOST=\"0.0.0.0\"; ollama serve')); ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Copied serve cmd'))); }),
           ]),
           const SizedBox(height:12),
-          TextField(controller: urlCtrl, decoration: const InputDecoration(labelText: 'AERO URL (paste)', hintText: 'http://192.168.1.15:11434', border: OutlineInputBorder())),
+          TextField(controller: urlCtrl, decoration: const InputDecoration(labelText: 'AERO URL (tap to paste)', hintText: 'http://192.168.1.15:11434', border: OutlineInputBorder())),
           const SizedBox(height:8),
           TextField(controller: modelCtrl, decoration: const InputDecoration(labelText: 'Model', hintText: 'llama3', border: OutlineInputBorder())),
           const SizedBox(height:8),
-          const SelectableText('Bible mode: ask "Explain Romans 8:28 with Greek" or "Bible plan for anxiety"', style: TextStyle(fontSize:10, fontStyle: FontStyle.italic)),
-          const SizedBox(height:4),
-          SelectableText('Now: ${DateFormat('yyyy-MM-dd HH:mm EEEE').format(DateTime.now())} Detroit | On-device: ${AeroOnDeviceService._modelLoaded ? "ready" : "download needed"}', style: const TextStyle(fontSize:10, color: Colors.grey)),
+          SelectableText('Current real time: ${DateFormat('yyyy-MM-dd HH:mm:ss EEEE').format(DateTime.now())} Detroit EST', style: TextStyle(fontSize:10, color: Colors.grey)),
         ]),
       ),
       actions:[
@@ -3318,9 +3440,9 @@ class _AiChatTabState extends State<AiChatTab> {
     });
     _scrollToBottom();
     try {
+      // Gather context: last 7 days data for smarter answers
       String contextPrompt = text;
-      final lq = text.toLowerCase();
-      if(lq.contains('week') || lq.contains('summary') || lq.contains('habit') || lq.contains('time') || lq.contains('date')){
+      if(text.toLowerCase().contains('week') || text.toLowerCase().contains('summary') || text.toLowerCase().contains('habit')){
         try {
           final db = await DatabaseHelper.instance.database;
           final weekAgo = DateFormat('yyyy-MM-dd').format(DateTime.now().subtract(const Duration(days: 7)));
@@ -3329,30 +3451,40 @@ class _AiChatTabState extends State<AiChatTab> {
           final journals = await db.query('journal_entries', where: 'date >= ?', whereArgs: [weekAgo]);
           double net = 0;
           for(var t in txs){ final amt=(t['amount'] as num).toDouble(); net+=t['type']=='Income'?amt:-amt; }
-          contextPrompt = 'Now ${DateFormat('yyyy-MM-dd HH:mm').format(DateTime.now())} Last7d ${completions.length} habits ${txs.length} tx net \$${net.toStringAsFixed(0)} ${journals.length} journals. Q: $text';
+          contextPrompt = 'Context — Last 7 days: ${completions.length} habit completions, ${txs.length} transactions net \$${net.toStringAsFixed(0)}, ${journals.length} writing entries.\n\nUser question: $text\n\nAnswer concisely, helpful, local-first.';
+        } catch(_){}
+      }
+      // 1. Try WiFi — Ollama on Surface (like every other app using WiFi)
+      String response = await AiCopilotService.improveText(contextPrompt, instruction: 'You are Onyx Beacon AERO, local-first, helpful, concise. Answer the user question directly. Current time: ${DateFormat('h:mm a, EEEE, MMM d, yyyy').format(DateTime.now())}');
+      
+      // 2. If Ollama fails (404, offline, Surface dead, no WiFi), fall back to on-device TinyLlama — true offline
+      if(response.startsWith('AI Error:') || response.startsWith('AI Offline:') || response.contains('Error:')){
+        try {
+          final hasModel = await AeroOnDeviceService.checkModelExists();
+          if(hasModel){
+            final onDevice = await AeroOnDeviceService.generateOnDevice(contextPrompt);
+            response = onDevice + '\n\n(on-device — offline mode, no WiFi/laptop needed)';
+          } else {
+            // If no on-device model yet, keep Ollama error but add helpful hint for phone
+            response = response + '\n\nTip for true offline on iPhone: Settings → Download 600MB Model (one time), then it works with no WiFi/Surface.';
+          }
         } catch(_){
-          contextPrompt = 'Now ${DateFormat('yyyy-MM-dd HH:mm').format(DateTime.now())}. Q: $text';
+          // Keep original Ollama error if on-device also fails
         }
       }
-      String response = await AiCopilotService.improveText(contextPrompt, instruction: 'You are Onyx Beacon AERO, local-first, helpful. Answer directly. Time ${DateFormat('h:mm a, EEEE, MMM d, yyyy').format(DateTime.now())}.');
-      if(response.startsWith('AI Error:') || response.startsWith('AI Offline:') || response.startsWith('Error:')){
-        if(await AeroOnDeviceService.checkModelExists()){
-          try {
-            final od = await AeroOnDeviceService.generateOnDevice(contextPrompt);
-            response = od + '\n\n[AERO on-device offline]';
-          } catch(_){}
-        }
-      }
+      
       setState((){
         _messages.add({'role':'assistant','text':response});
         _isLoading = false;
       });
     } catch(e){
+      // Last resort — try on-device
       try {
-        if(await AeroOnDeviceService.checkModelExists()){
-          final od = await AeroOnDeviceService.generateOnDevice(text);
+        final hasModel = await AeroOnDeviceService.checkModelExists();
+        if(hasModel){
+          final onDevice = await AeroOnDeviceService.generateOnDevice(text);
           setState((){
-            _messages.add({'role':'assistant','text':od + '\n\n[on-device fallback]'});
+            _messages.add({'role':'assistant','text':onDevice + '\n\n(on-device fallback)'});
             _isLoading = false;
           });
           _scrollToBottom();
@@ -3360,14 +3492,29 @@ class _AiChatTabState extends State<AiChatTab> {
         }
       } catch(_){}
       setState((){
-        _messages.add({'role':'assistant','text':'Error: $e. Surface: OLLAMA_HOST=0.0.0.0 ollama serve + ollama pull llama3. iPhone: Download 600MB Model for offline.'});
+        _messages.add({'role':'assistant','text':'Error: $e\n\nFix Surface: ollama pull llama3 && ollama run llama3\nFix iPhone offline: Settings → Download 600MB Model'});
         _isLoading = false;
       });
     }
     _scrollToBottom();
   }
 
-  void _scrollToBottom(){
+  
+  Future<void> _startListening() async {
+    bool avail = await _speech.initialize();
+    if(avail){
+      setState(()=>_listening=true);
+      _speech.listen(onResult: (res){
+        setState(()=>_inputCtrl.text = res.recognizedWords);
+      });
+    }
+  }
+  void _stopListening(){
+    _speech.stop();
+    setState(()=>_listening=false);
+  }
+
+void _scrollToBottom(){
     WidgetsBinding.instance.addPostFrameCallback((_){
       if(_scrollCtrl.hasClients){
         _scrollCtrl.animateTo(_scrollCtrl.position.maxScrollExtent + 120, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
