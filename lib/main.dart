@@ -576,7 +576,7 @@ extension WritingStatusExt on WritingStatus {
 //   → Apple Intelligence (FoundationModels, iOS 26+) → Home server (Ollama on a PC on the same Wi-Fi).
 // AeroRouter detects what exists, keeps the conversation, falls through on failure, and never nags.
 
-enum AeroEngine { core, local, apple, ollama }
+enum AeroEngine { core, local, apple, ollama, maps }
 
 extension AeroEngineExt on AeroEngine {
   String get shortName {
@@ -585,6 +585,7 @@ extension AeroEngineExt on AeroEngine {
       case AeroEngine.local: return AeroOnDeviceService.activeSpec?.name ?? 'On-device model';
       case AeroEngine.apple: return 'Apple Intelligence';
       case AeroEngine.ollama: return 'Home server';
+      case AeroEngine.maps: return 'Apple Maps';
     }
   }
   IconData get icon {
@@ -593,6 +594,7 @@ extension AeroEngineExt on AeroEngine {
       case AeroEngine.local: return Icons.phone_iphone;
       case AeroEngine.apple: return Icons.auto_awesome;
       case AeroEngine.ollama: return Icons.computer;
+      case AeroEngine.maps: return Icons.place_outlined;
     }
   }
   Color get color {
@@ -601,6 +603,7 @@ extension AeroEngineExt on AeroEngine {
       case AeroEngine.local: return Colors.green;
       case AeroEngine.apple: return Colors.deepPurple;
       case AeroEngine.ollama: return Colors.orange;
+      case AeroEngine.maps: return Colors.teal;
     }
   }
 }
@@ -751,10 +754,11 @@ class AeroPrompts {
     b.writeln('Be warm, direct and genuinely useful on any topic: ideas, advice, planning, learning, writing, faith, '
         'health and money. Match their tone. Keep replies short unless they ask for depth. '
         'Use the conversation so far to understand follow-up questions.');
-    b.writeln("Be honest: never invent places, businesses, addresses, distances, quotes, scripture or statistics. "
-        "If you aren't sure, say so in one line and still give your most useful guidance. You can't browse the "
-        "internet or see their live location, so for hours, prices or what's nearby, share what you reliably know "
-        'and suggest checking Maps.');
+    b.writeln('Be confident and specific. Never invent places, businesses, addresses, distances, quotes, scripture '
+        "or statistics — if you aren't sure of a detail, say so briefly and still give your most useful answer. "
+        'When Apple Maps results appear in the conversation, treat them as the real list of nearby places and use '
+        'them for follow-up questions. For things that change often (hours, prices, news), share what you know and '
+        'note it may have changed.');
     if (snapshot != null && snapshot.isNotEmpty) b.writeln('Their Onyx Beacon data right now:\n$snapshot');
     return b.toString().trim();
   }
@@ -806,6 +810,79 @@ class AeroContext {
     } catch (e) {
       debugPrint('[AERO] snapshot failed: $e');
       return '';
+    }
+  }
+}
+
+// --- Nearby places: Apple Maps search on iPhone (built into iOS: free, no account, no API key) ---
+// Real names, addresses, distances and phone numbers — so AERO never has to guess what's around you.
+class AeroPlaces {
+  static const MethodChannel _channel = MethodChannel('com.onyxbeacon/aero');
+  static final RegExp _nearby = RegExp(
+    r'\b(?:near me|nearby|near by|near here|around me|around here|close to me|close by|closest|nearest|in my area|'
+    r'near my (?:house|home|place|apartment|job|work|school|office))\b|'
+    r'\bwhere (?:can|should|could) i (?:get|find|buy|eat|go for)\b|\bwhere to (?:get|find|buy|eat)\b',
+  );
+  static const Set<String> _filler = {
+    'which', 'what', 'whats', "what's", 'where', 'are', 'is', 'the', 'best', 'good', 'great', 'top', 'some', 'any',
+    'find', 'show', 'me', 'can', 'could', 'should', 'you', 'please', 'recommend', 'recommendations', 'a', 'an',
+    'there', "there's", 'to', 'go', 'i', 'get', 'buy', 'eat', 'for', 'of', 'near', 'nearby', 'around', 'here',
+    'closest', 'nearest', 'close', 'by', 'my', 'area', 'place', 'places', 'spot', 'spots', 'open', 'now', 'today',
+    'tonight', 'right', 'lol', 'hey', 'aero', 'yo', 'like', 'really', 'and', 'or', 'cool', 'nice',
+  };
+
+  static bool get supported => Platform.isIOS;
+
+  static bool isNearbyQuery(String text) =>
+      supported && !AeroPrompts.looksLikeScripture(text) && _nearby.hasMatch(text.toLowerCase());
+
+  /// "which cider mills are best near me?" → "cider mills"
+  static String searchTerms(String text) {
+    final stripped = text.toLowerCase().replaceAll(_nearby, ' ').replaceAll(RegExp(r"[^a-z0-9&' ]"), ' ');
+    return stripped.split(RegExp(r'\s+')).where((w) => w.isNotEmpty && !_filler.contains(w)).join(' ').trim();
+  }
+
+  /// A ready-to-show answer, or null to let the thinking engines answer instead (offline, no results service, etc.).
+  static Future<String?> answer(String text) async {
+    final terms = searchTerms(text);
+    if (terms.isEmpty) return null;
+    try {
+      final res = await _channel
+          .invokeMapMethod<String, dynamic>('placesSearch', {'query': terms, 'near': AeroSettings.userCity.trim()})
+          .timeout(const Duration(seconds: 25));
+      if (res == null) return null;
+      final near = (res['near'] ?? '').toString();
+      final raw = res['items'];
+      final items = raw is List ? raw.whereType<Map>().toList() : <Map>[];
+      final where = near.isEmpty ? '' : (near == 'you' ? ' near you' : ' around $near');
+      if (items.isEmpty) {
+        return "Apple Maps didn't turn up any $terms$where. Try a different word for it — a type of place or a business name.";
+      }
+      final b = StringBuffer('Here\'s what Apple Maps found for "$terms"$where:\n');
+      for (int i = 0; i < items.length; i++) {
+        final m = items[i];
+        final parts = <String>[];
+        final address = (m['address'] ?? '').toString().trim();
+        if (address.isNotEmpty) parts.add(address);
+        final miles = m['miles'];
+        if (miles is num) parts.add('${miles.toStringAsFixed(miles < 10 ? 1 : 0)} mi');
+        final phone = (m['phone'] ?? '').toString().trim();
+        if (phone.isNotEmpty) parts.add(phone);
+        b.writeln('${i + 1}. ${m['name']}${parts.isEmpty ? '' : ' — ${parts.join(' · ')}'}');
+      }
+      if (near.isEmpty) {
+        b.writeln('\nFor results around you, allow Location for Onyx Beacon in iPhone Settings, or add your city in AERO → 👤.');
+      }
+      b.write('\nWant me to compare a few, or tell you more about one?');
+      return b.toString();
+    } on MissingPluginException {
+      return null;
+    } on PlatformException catch (e) {
+      debugPrint('[AERO] places search failed: ${e.code} ${e.message}');
+      return null;
+    } on TimeoutException {
+      debugPrint('[AERO] places search timed out');
+      return null;
     }
   }
 }
@@ -1118,7 +1195,9 @@ class AeroOnDeviceService {
       return "$hello It's $timeStr. $status";
     }
 
-    if (lower.contains('what time') || lower.contains('current time') || lower == 'time' ||
+    // Only real "what's the time/date" questions — "what time does the store close?" goes to the AI instead.
+    if (lower == 'what time' || lower.startsWith('what time is it') || lower.contains("what's the time") ||
+        lower.contains('current time') || lower == 'time' ||
         lower.contains('what day is it') || lower.contains("what's the date") || lower.contains('what is the date') ||
         lower.contains("today's date")) {
       return "It's $timeStr.";
@@ -1194,8 +1273,8 @@ class AeroOnDeviceService {
 
     if (lower == 'help' || lower.contains('what can you do')) {
       return 'Ask me anything — ideas, advice, planning, learning, writing, faith, health or money. '
-          'I also know what\'s in this app, so "plan my day", "summarize my week" or "how much have I spent" work too. '
-          'Everything stays on your phone.';
+          'I also know what\'s in this app, so "plan my day", "summarize my week" or "how much have I spent" work too'
+          '${AeroPlaces.supported ? ', and "coffee near me" searches Apple Maps' : ''}. Your data stays on your phone.';
     }
     return null;
   }
@@ -1321,6 +1400,13 @@ class AeroArchitectureService {
         availability: r.ollamaOnline ? 'Online at ${AeroSettings.ollamaUrl}' : 'Not reachable', ready: r.ollamaOnline,
         active: primary == AeroEngine.ollama,
       ),
+      AeroEngineInfo(
+        id: AeroEngine.maps, name: 'Apple Maps', subtitle: 'Places nearby • iPhone • needs internet',
+        description: 'Questions like "coffee near me" search Apple Maps for real names, addresses and distances — no guessing. '
+            'Uses your location (or your city) only for that search.',
+        availability: AeroPlaces.supported ? 'Ready — just ask about places nearby' : 'iPhone only',
+        ready: AeroPlaces.supported, active: false,
+      ),
     ];
   }
 }
@@ -1351,6 +1437,7 @@ class AeroRouter extends ChangeNotifier {
       case AeroEngine.local: return hasModel;
       case AeroEngine.apple: return appleAvailable;
       case AeroEngine.ollama: return ollamaOnline;
+      case AeroEngine.maps: return false; // a lookup, not a thinking engine — never in the model order
     }
   }
 
@@ -1385,6 +1472,7 @@ class AeroRouter extends ChangeNotifier {
       case AeroEngine.local: return '${localModel?.name ?? 'On-device'} • on-device • private';
       case AeroEngine.apple: return 'Apple Intelligence • on-device • private';
       case AeroEngine.ollama: return 'Home server • Ollama';
+      case AeroEngine.maps: return 'Apple Maps';
     }
   }
 
@@ -1486,7 +1574,8 @@ class AeroRouter extends ChangeNotifier {
       case AeroEngine.ollama:
         return AiCopilotService.chat(system: system, history: history, user: user);
       case AeroEngine.core:
-        throw AeroException(AeroErrorKind.unavailable, 'Quick answers have no model');
+      case AeroEngine.maps:
+        throw AeroException(AeroErrorKind.unavailable, '${e.shortName} has no model');
     }
   }
 
@@ -1494,6 +1583,11 @@ class AeroRouter extends ChangeNotifier {
   Future<AeroReply> ask(String prompt,
       {List<AeroMessage> history = const [], void Function(String partial)? onPartial, bool allowCore = true, bool writing = false}) async {
     if (allowCore) {
+      // Nearby questions first, so words like "to do" or "what time" inside them can't trigger a quick answer.
+      if (!writing && AeroPlaces.isNearbyQuery(prompt)) {
+        final places = await AeroPlaces.answer(prompt);
+        if (places != null) return AeroReply(places, AeroEngine.maps);
+      }
       final quick = await AeroOnDeviceService.coreFastPath(prompt);
       if (quick != null) return AeroReply(quick, AeroEngine.core);
     }
@@ -1531,11 +1625,12 @@ class AeroRouter extends ChangeNotifier {
     }
     final progress = AeroOnDeviceService.downloadProgress.value;
     final hint = progress != null
-        ? "My on-device brain is still downloading (${(progress * 100).toStringAsFixed(0)}%). Ask me again when it's done."
-        : "I'll need my on-device brain for that one. Tap Set up in the bar above — it's a one-time "
-            '${recommendedModel.sizeLabel} download over Wi-Fi, then I work offline and privately.';
+        ? "I'm finishing setting up my on-device brain (${(progress * 100).toStringAsFixed(0)}%) — ask me again in a minute and I'll take this one on fully."
+        : "Let's unlock my full brain for this one: tap Set up in the bar above. It's a one-time "
+            '${recommendedModel.sizeLabel} download over Wi-Fi, then I answer anything, privately, even offline.';
+    final extras = AeroPlaces.supported ? ', find places nearby' : '';
     return AeroReply(
-      '$hint\nRight now I can instantly summarize your week, list what\'s left today, show open tasks or check your spending.',
+      '$hint\nAlready ready to go: plan your day, summarize your week, check your spending$extras.',
       AeroEngine.core,
     );
   }
@@ -2246,11 +2341,28 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
                 listenable: AeroRouter.instance,
                 builder: (context, _) {
                   final name = AeroSettings.userName.trim();
-                  return Text(name.isEmpty ? 'Welcome back.' : 'Welcome back, $name.', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold));
+                  return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(name.isEmpty ? 'Welcome to Onyx Beacon.' : 'Welcome back, $name.', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+                    if (name.isEmpty) ...[
+                      const SizedBox(height: 12),
+                      Card(
+                        color: Colors.deepPurple.shade50,
+                        child: ListTile(
+                          leading: const Icon(Icons.person_outline, color: Colors.deepPurple),
+                          title: const Text('Make it yours', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                          subtitle: const Text('Tell AERO your name and a little about you — takes 20 seconds.', style: TextStyle(fontSize: 11)),
+                          trailing: const Icon(Icons.chevron_right),
+                          onTap: () => showAeroProfileDialog(context),
+                        ),
+                      ),
+                    ],
+                  ]);
                 },
               ),
               const SizedBox(height: 16),
               DailyBriefingWidget(onNavigateToTab: widget.onNavigateToTab),
+              const SizedBox(height: 12),
+              AeroStatusCard(onOpen: () => widget.onNavigateToTab?.call(5)),
               const SizedBox(height: 12),
               TextField(
                 controller: _searchController,
@@ -2282,36 +2394,46 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
                 children: [
                   MetricCard(title: 'Habits', value: '$_habitCount Tracked', icon: Icons.bolt, color: Colors.orange),
                   MetricCard(title: 'Tasks', value: '$_taskCount Active', icon: Icons.task_alt, color: Colors.blue),
-                  MetricCard(title: 'Finance Ledger', value: '$_txCount Transactions', icon: Icons.account_balance_wallet, color: Colors.green),
-                  MetricCard(title: 'Writing Studio', value: '$_journalCount Drafts', icon: Icons.menu_book, color: Colors.purple),
+                  MetricCard(title: 'Money', value: '$_txCount Transactions', icon: Icons.account_balance_wallet, color: Colors.green),
+                  MetricCard(title: 'Writing', value: '$_journalCount Entries', icon: Icons.menu_book, color: Colors.purple),
                   MetricCard(title: 'Weekly Net', value: '\$${_weeklyNet.toStringAsFixed(0)}', icon: Icons.trending_up, color: _weeklyNet>=0?Colors.green:Colors.red),
                   MetricCard(title: 'Words This Week', value: '$_weeklyWords words', icon: Icons.edit_note, color: Colors.indigo),
                 ],
               ),
               const SizedBox(height: 16),
-              const Text('Cross-Module Analytics', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              const Text('Your week at a glance', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
               CrossModuleAnalyticsWidget(weeklyNet: _weeklyNet, weeklyWords: _weeklyWords, habitCount: _habitCount),
               const SizedBox(height: 16),
-              const Text('Habit Heatmap — Last 42 Days', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              const Text('Habit consistency — last 6 weeks', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
               const HabitHeatmapWidget(),
               const SizedBox(height: 16),
-              const WeeklyReviewCard(),
-              const SizedBox(height: 12),
-              const P2PSyncCard(),
-              const SizedBox(height: 12),
-              AeroStatusCard(onOpen: () => widget.onNavigateToTab?.call(5)),
-              const SizedBox(height: 12),
+              // Power tools stay one tap away but out of a new user's first impression.
               Card(
-                child: ListTile(
-                  leading: const Icon(Icons.file_download_outlined),
-                  title: const Text('Quick Export'),
-                  subtitle: const Text('Backup entire vault as JSON / Encrypted .enc'),
-                  trailing: Row(mainAxisSize: MainAxisSize.min, children:[
-                    IconButton(icon: const Icon(Icons.lock_outline), tooltip: 'Encrypted .enc', onPressed: ()=>_showEncryptedDialog(context)),
-                    ElevatedButton(onPressed: () => ExportService.exportFullBackup(), child: const Text('Export')),
-                  ]),
+                clipBehavior: Clip.antiAlias,
+                child: ExpansionTile(
+                  leading: const Icon(Icons.build_circle_outlined),
+                  title: const Text('Tools & backups', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                  subtitle: const Text('Weekly PDF report, backups, Wi-Fi sync', style: TextStyle(fontSize: 11)),
+                  childrenPadding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                  children: [
+                    const WeeklyReviewCard(),
+                    const SizedBox(height: 8),
+                    Card(
+                      child: ListTile(
+                        leading: const Icon(Icons.file_download_outlined),
+                        title: const Text('Back up everything'),
+                        subtitle: const Text('Save all your data as a file, optionally password-protected'),
+                        trailing: Row(mainAxisSize: MainAxisSize.min, children:[
+                          IconButton(icon: const Icon(Icons.lock_outline), tooltip: 'Password-protected backup', onPressed: ()=>_showEncryptedDialog(context)),
+                          ElevatedButton(onPressed: () => ExportService.exportFullBackup(), child: const Text('Export')),
+                        ]),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const P2PSyncCard(),
+                  ],
                 ),
               ),
             ],
@@ -4180,6 +4302,49 @@ class _GameTabState extends State<GameTab> {
 
 
 
+/// Personalize AERO — shared by the AERO tab (👤) and the dashboard's "Make it yours" card.
+Future<void> showAeroProfileDialog(BuildContext context) {
+  final nameCtrl = TextEditingController(text: AeroSettings.userName);
+  final cityCtrl = TextEditingController(text: AeroSettings.userCity);
+  final aboutCtrl = TextEditingController(text: AeroSettings.userAbout);
+  return showDialog<void>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('Make AERO yours'),
+      content: SingleChildScrollView(
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('AERO uses this to talk to you like it knows you. It stays on this device.', style: TextStyle(fontSize: 12, color: Colors.grey)),
+          const SizedBox(height: 12),
+          TextField(controller: nameCtrl, textCapitalization: TextCapitalization.words,
+              decoration: const InputDecoration(labelText: 'What should AERO call you?', border: OutlineInputBorder(), isDense: true)),
+          const SizedBox(height: 10),
+          TextField(controller: cityCtrl, textCapitalization: TextCapitalization.words,
+              decoration: const InputDecoration(labelText: 'City (optional)', hintText: 'Used for places nearby if Location is off', border: OutlineInputBorder(), isDense: true)),
+          const SizedBox(height: 10),
+          TextField(controller: aboutCtrl, minLines: 3, maxLines: 5, textCapitalization: TextCapitalization.sentences,
+              decoration: const InputDecoration(
+                labelText: 'About you (optional)',
+                hintText: 'e.g. Student, into fitness and faith, writing a book, saving for a car',
+                alignLabelWithHint: true,
+                border: OutlineInputBorder(),
+              )),
+        ]),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+        ElevatedButton(
+          onPressed: () async {
+            await AeroSettings.saveProfile(name: nameCtrl.text, city: cityCtrl.text, about: aboutCtrl.text);
+            AeroRouter.instance.profileChanged();
+            if (ctx.mounted) Navigator.pop(ctx);
+          },
+          child: const Text('Save'),
+        ),
+      ],
+    ),
+  );
+}
+
 // ==================== AERO TAB — personal assistant, auto engine, memory, streaming ====================
 class AiChatTab extends StatefulWidget {
   const AiChatTab({super.key});
@@ -4198,12 +4363,13 @@ class _AiChatTabState extends State<AiChatTab> {
 
   bool get _voiceSupported => Platform.isIOS || Platform.isAndroid || Platform.isMacOS;
 
-  static const List<String> _suggestions = [
-    'Plan my day',
-    'Summarize my week',
-    'Give me a quick motivation boost',
-    'Help me write something',
-  ];
+  List<String> get _suggestions => [
+        'Plan my day',
+        'Summarize my week',
+        if (AeroPlaces.supported) 'Coffee near me',
+        'Give me a quick motivation boost',
+        'Help me write something',
+      ];
 
   @override
   void initState() {
@@ -4234,10 +4400,12 @@ class _AiChatTabState extends State<AiChatTab> {
   String get _welcome {
     final name = AeroSettings.userName.trim();
     if (name.isEmpty) {
-      return "Hey! I'm AERO, your personal assistant. Ask me anything — ideas, advice, planning, learning, writing — "
-          'and I also know your habits, tasks, money and journal in this app. Everything stays on your phone.';
+      return "Hey! I'm AERO, your personal assistant. Ask me anything — ideas, advice, planning, learning, writing"
+          "${AeroPlaces.supported ? ', places nearby' : ''} — and I already know your habits, tasks, money and journal "
+          'in this app. Your data stays on your phone.';
     }
-    return "Hey $name — what's on your mind? I can help with anything, and I know what's going on in your habits, tasks, money and journal.";
+    return "Hey $name — what's on your mind? Ask me anything${AeroPlaces.supported ? ', from ideas to places nearby' : ''}. "
+        "I already know what's going on in your habits, tasks, money and journal.";
   }
 
   Future<void> _send([String? preset]) async {
@@ -4262,47 +4430,7 @@ class _AiChatTabState extends State<AiChatTab> {
     ));
   }
 
-  void _showProfile() {
-    final nameCtrl = TextEditingController(text: AeroSettings.userName);
-    final cityCtrl = TextEditingController(text: AeroSettings.userCity);
-    final aboutCtrl = TextEditingController(text: AeroSettings.userAbout);
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Personalize AERO'),
-        content: SingleChildScrollView(
-          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text('AERO uses this to talk to you like it knows you. It stays on this device.', style: TextStyle(fontSize: 12, color: Colors.grey)),
-            const SizedBox(height: 12),
-            TextField(controller: nameCtrl, textCapitalization: TextCapitalization.words,
-                decoration: const InputDecoration(labelText: 'What should AERO call you?', border: OutlineInputBorder(), isDense: true)),
-            const SizedBox(height: 10),
-            TextField(controller: cityCtrl, textCapitalization: TextCapitalization.words,
-                decoration: const InputDecoration(labelText: 'City (optional)', hintText: 'Helps with local suggestions', border: OutlineInputBorder(), isDense: true)),
-            const SizedBox(height: 10),
-            TextField(controller: aboutCtrl, minLines: 3, maxLines: 5, textCapitalization: TextCapitalization.sentences,
-                decoration: const InputDecoration(
-                  labelText: 'About you (optional)',
-                  hintText: 'e.g. Student, into fitness and faith, writing a book, saving for a car',
-                  alignLabelWithHint: true,
-                  border: OutlineInputBorder(),
-                )),
-          ]),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          ElevatedButton(
-            onPressed: () async {
-              await AeroSettings.saveProfile(name: nameCtrl.text, city: cityCtrl.text, about: aboutCtrl.text);
-              _router.profileChanged();
-              if (ctx.mounted) Navigator.pop(ctx);
-            },
-            child: const Text('Save'),
-          ),
-        ],
-      ),
-    );
-  }
+  void _showProfile() => showAeroProfileDialog(context);
 
   Widget _modelTile(AeroModelSpec spec, double? progress) {
     final installed = _router.installedModels.any((s) => s.id == spec.id);

@@ -6,7 +6,19 @@
 
 ---
 
-## PUSH 5.4 — AERO becomes a personal assistant (current state)
+## PUSH 5.5 — AERO knows what's around you, sounds confident, dashboard for real people (current state, builds on 5.4)
+
+- **Apple Maps for places nearby:** "coffee near me", "closest gas station", "where can I get pho" search Apple Maps through the native bridge (`placesSearch` on `com.onyxbeacon/aero`, `MKLocalSearch`). Real names, addresses, distances and phone numbers, sorted by distance. Free: built into iOS, no API key, no account. Works even with no AI model installed.
+  - Location: asked once, the first time you ask about places (`NSLocationWhenInUseUsageDescription`). If declined, the city from AERO → 👤 is used; if neither, Apple Maps searches without a center and AERO says how to fix it.
+  - Follow-ups ("…Yates?!") go to the AI with the Maps list in the conversation, so it talks about real places.
+  - Nearby questions are checked before quick answers, so "where to do laundry near me" no longer shows your task list.
+- **AERO no longer talks itself down:** removed "you can't browse the internet or see their live location"; replaced with confident, honest guidance (use Maps results, flag things that change often). Fallback copy rewritten as "let's unlock…" instead of "I'll need…".
+- **"What time does X close" fixed:** only real time/date questions trigger the instant clock answer.
+- **Dashboard for testers:** "Make it yours" card when no name is set (opens the same personalize dialog as AERO → 👤); AERO card moved up under the daily briefing; Weekly PDF, backups and Wi-Fi sync folded into a collapsed **Tools & backups** section; friendlier labels (Money, Writing, Your week at a glance, Habit consistency).
+- **CI:** build fails if the places code or the location permission text is missing from the IPA.
+- Version 1.0.0+13.
+
+## PUSH 5.4 — AERO becomes a personal assistant
 
 - **Personalized, not hardcoded:** name / city / "about you" set in AERO → 👤. Used by AERO's prompt, greetings and the dashboard. No more hardcoded name, city or Bible branding; scripture is handled when asked, like any topic.
 - **Conversation memory:** last 8 messages (~2,400 chars) go to every engine. Apple Intelligence gets a fresh session per message with the recent turns inside the prompt (stays under its 4,096-token window; avoids the context-error type whose name changed between SDKs).

@@ -55,12 +55,22 @@ jobs:
           else
             echo "::error::AeroAppleAI.swift is not in the app binary - check ios/Runner.xcodeproj/project.pbxproj was committed"; exit 1
           fi
+          if strings "$APP/Runner" | grep -q "placesSearch"; then
+            echo "OK: Apple Maps places search compiled in"
+          else
+            echo "::error::Places search is missing from the app binary - check ios/Runner/AeroAppleAI.swift was committed"; exit 1
+          fi
+          if /usr/libexec/PlistBuddy -c "Print :NSLocationWhenInUseUsageDescription" "$APP/Info.plist" >/dev/null 2>&1; then
+            echo "OK: Location permission text present"
+          else
+            echo "::error::NSLocationWhenInUseUsageDescription missing from Info.plist - iOS would crash when asking for location"; exit 1
+          fi
           if otool -l "$APP/Runner" | grep -A2 LC_LOAD_WEAK_DYLIB | grep -q FoundationModels; then
             echo "OK: FoundationModels weak-linked (safe on iOS 18 devices)"
           else
             echo "::warning::FoundationModels not weak-linked - check OTHER_LDFLAGS in project.pbxproj"
           fi
-          if ls "$APP/Frameworks" | grep -qi fllama; then echo "OK: fllama (TinyLlama engine) bundled"; else echo "::warning::fllama framework not found in Frameworks"; fi
+          if ls "$APP/Frameworks" | grep -qi fllama; then echo "OK: fllama (on-device AI engine) bundled"; else echo "::warning::fllama framework not found in Frameworks"; fi
 
       - name: Package into IPA for Sideloadly
         run: |
