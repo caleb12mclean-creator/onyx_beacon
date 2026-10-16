@@ -42,14 +42,22 @@ Future<void> main() async {
       await windowManager.ensureInitialized();
       WindowOptions opts = const WindowOptions(size: Size(1280,800), center:true, backgroundColor: Colors.transparent, skipTaskbar:false, titleBarStyle: TitleBarStyle.normal, title: 'Onyx Beacon — Command Center');
       await windowManager.waitUntilReadyToShow(opts, () async { await windowManager.show(); await windowManager.focus(); });
-      final tray = SystemTray();
-      await tray.initSystemTray(title: "Onyx Beacon", iconPath: Platform.isWindows ? "windows/runner/resources/app_icon.ico" : "", toolTip: "Onyx Beacon — Command Center");
-      final menu = Menu();
-      await menu.buildFrom([MenuItemLabel(label: 'Show Onyx Beacon', onClicked: (_) async => await windowManager.show()), MenuSeparator(), MenuItemLabel(label: 'Quit', onClicked: (_) => exit(0))]);
-      await tray.setContextMenu(menu);
-      tray.registerSystemTrayEventHandler((e){ if(e==kSystemTrayEventClick) windowManager.show(); });
+    } catch(e){ debugPrint('Window: $e'); }
+    // Tray is optional: it needs an absolute .ico path (a relative one gave "Bad Arguments").
+    try {
+      final icon = path.join(Directory.current.path, 'windows', 'runner', 'resources', 'app_icon.ico');
+      if (Platform.isWindows && File(icon).existsSync()) {
+        final tray = SystemTray();
+        await tray.initSystemTray(title: "Onyx Beacon", iconPath: icon, toolTip: "Onyx Beacon — Command Center");
+        final menu = Menu();
+        await menu.buildFrom([MenuItemLabel(label: 'Show Onyx Beacon', onClicked: (_) async => await windowManager.show()), MenuSeparator(), MenuItemLabel(label: 'Quit', onClicked: (_) => exit(0))]);
+        await tray.setContextMenu(menu);
+        tray.registerSystemTrayEventHandler((e){ if(e==kSystemTrayEventClick) windowManager.show(); });
+      }
+    } catch(e){ debugPrint('Tray: $e'); }
+    try {
       launchAtStartup.setup(appName: 'Onyx Beacon', appPath: Platform.resolvedExecutable);
-    } catch(e){ debugPrint('Window/Tray: $e'); }
+    } catch(e){ debugPrint('Startup: $e'); }
   }
   runApp(const OnyxBeaconApp());
   // AERO picks its engine in the background — no dialog, no prompt.
@@ -97,20 +105,22 @@ class OnyxBeaconApp extends StatelessWidget {
 // ==================== DATABASE HELPER v5 ====================
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
-  static Database? _database;
+  // One shared Future: every widget that asks during startup waits on the SAME open,
+  // instead of each opening its own connection (that raced 4x at launch).
+  static Future<Database>? _dbFuture;
 
   DatabaseHelper._init();
 
-  Future<Database> get database async {
-    if (_database != null) return _database!;
-    _database = await _initDB('onyx_beacon.db');
-    return _database!;
-  }
+  Future<Database> get database => _dbFuture ??= _initDB('onyx_beacon.db').catchError((Object e, StackTrace st) {
+        // If opening failed, let the next caller retry instead of caching the error forever.
+        _dbFuture = null;
+        return Future<Database>.error(e, st);
+      });
 
   Future<Database> _initDB(String filePath) async {
     String dbPath;
     if (Platform.isWindows || Platform.isLinux) {
-      try { sqfliteFfiInit(); databaseFactory = databaseFactoryFfi; } catch (_) {}
+      // main() already set databaseFactory = databaseFactoryFfi; setting it again only repeats the warning.
       dbPath = await databaseFactoryFfi.getDatabasesPath();
     } else {
       dbPath = await getDatabasesPath();
