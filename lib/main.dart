@@ -27,6 +27,7 @@ import 'package:pdf/pdf.dart' as pdfLib;
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'package:fllama/fllama.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 
 Future<void> _initHomeWidget() async {
   try { await HomeWidget.setAppGroupId('group.onyxbeacon'); } catch(e){ debugPrint('HomeWidget: $e'); }
@@ -51,6 +52,8 @@ Future<void> main() async {
     } catch(e){ debugPrint('Window/Tray: $e'); }
   }
   runApp(const OnyxBeaconApp());
+  // AERO picks its engine in the background — no dialog, no prompt.
+  unawaited(AeroRouter.instance.detect(force: true));
 }
 
 class OnyxBeaconApp extends StatelessWidget {
@@ -270,13 +273,13 @@ class DatabaseHelper {
     final db = await database;
     return await db.query('habits');
   }
-  Future<int> insertHabit(String name) async {
+  Future<int> insertHabit(String name, {String color = '#FF6B6B'}) async {
     final db = await database;
-    return await db.insert('habits', {'name': name});
+    return await db.insert('habits', {'name': name, 'color': color});
   }
-  Future<int> updateHabit(int id, String name) async {
+  Future<int> updateHabit(int id, String name, {String? color}) async {
     final db = await database;
-    return await db.update('habits', {'name': name}, where: 'id = ?', whereArgs: [id]);
+    return await db.update('habits', {'name': name, if (color != null) 'color': color}, where: 'id = ?', whereArgs: [id]);
   }
   Future<int> deleteHabit(int id) async {
     final db = await database;
@@ -293,9 +296,13 @@ class DatabaseHelper {
     final db = await database;
     final existing = await db.query('habit_completions', where: 'habit_id = ? AND completed_date = ?', whereArgs: [habitId, date]);
     if (existing.isNotEmpty) {
-      return await db.delete('habit_completions', where: 'habit_id = ? AND completed_date = ?', whereArgs: [habitId, date]);
+      final r = await db.delete('habit_completions', where: 'habit_id = ? AND completed_date = ?', whereArgs: [habitId, date]);
+      unawaited(ExportService.updateHomeWidget());
+      return r;
     } else {
-      return await db.insert('habit_completions', {'habit_id': habitId, 'completed_date': date});
+      final r = await db.insert('habit_completions', {'habit_id': habitId, 'completed_date': date});
+      unawaited(ExportService.updateHomeWidget());
+      return r;
     }
   }
   Future<int> getHabitStreak(int habitId) async {
@@ -303,9 +310,27 @@ class DatabaseHelper {
     if (completions.isEmpty) return 0;
     final dates = completions.map((e) => DateTime.parse(e['completed_date'] as String)).toList()..sort((a,b) => b.compareTo(a));
     int streak = 0;
+    DateTime current = DateTime.now();
+    // Normalize to date only
+    current = DateTime(current.year, current.month, current.day);
+    for (int i=0; i<dates.length; i++) {
+      final d = DateTime(dates[i].year, dates[i].month, dates[i].day);
+      final diff = current.difference(d).inDays;
+      if (diff == streak || (streak==0 && diff <=1)) {
+        streak++;
+        current = d.subtract(const Duration(days: 1));
+        // Actually need to check consecutive
+        // Simpler: check if sorted list has consecutive days from today or yesterday
+      } else {
+        break;
+      }
+    }
+    // More accurate streak calc:
+    streak = 0;
     DateTime checkDate = DateTime.now();
     checkDate = DateTime(checkDate.year, checkDate.month, checkDate.day);
     final dateSet = dates.map((e) => DateTime(e.year, e.month, e.day).toIso8601String().substring(0,10)).toSet();
+    // Allow streak to start today or yesterday
     if (!dateSet.contains(checkDate.toIso8601String().substring(0,10))) {
       checkDate = checkDate.subtract(const Duration(days:1));
     }
@@ -331,7 +356,9 @@ class DatabaseHelper {
   }
   Future<int> updateTaskCompletion(int id, int isCompleted) async {
     final db = await database;
-    return await db.update('tasks', {'isCompleted': isCompleted}, where: 'id = ?', whereArgs: [id]);
+    final r = await db.update('tasks', {'isCompleted': isCompleted}, where: 'id = ?', whereArgs: [id]);
+    unawaited(ExportService.updateHomeWidget());
+    return r;
   }
   Future<int> deleteTask(int id) async {
     final db = await database;
@@ -479,7 +506,9 @@ class ExportService {
       await Share.shareXFiles([XFile(file.path)], text: 'Encrypted Backup: $fileName');
     } catch (e) { debugPrint('Encrypted error: $e'); }
   }
+  static Future<void> updateHomeWidget() => _updateHomeWidget();
   static Future<void> _updateHomeWidget() async {
+    if (!Platform.isIOS && !Platform.isAndroid) return;
     try {
       final db = await DatabaseHelper.instance.database;
       final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
@@ -498,7 +527,9 @@ class ExportService {
   }
 }
 
+
 // ==================== PUSH 4 SOVEREIGN SERVICES ====================
+// Writing Status Enum
 enum WritingStatus { Idea, Drafting, Revision, Complete }
 extension WritingStatusExt on WritingStatus {
   String get label => toString().split('.').last;
@@ -528,275 +559,720 @@ extension WritingStatusExt on WritingStatus {
   }
 }
 
-// --- AERO Service (Local Ollama) ---
+
+// ==================== AERO — 4-ENGINE ARCHITECTURE (iPhone first) ====================
+// AERO is the brand on the dashboard + the SQLite brain. The engine that talks is swappable:
+//   Core (always, instant, no model) → Engine 1 TinyLlama (on-device file, offline, VPN-proof)
+//   → Engine 2 Apple Intelligence (FoundationModels via MethodChannel) → Engine 3 Ollama (Surface, same Wi-Fi)
+// AeroRouter detects what exists, picks automatically, falls through on failure, and never nags.
+
+enum AeroEngine { core, tinyllama, apple, ollama }
+
+extension AeroEngineExt on AeroEngine {
+  String get shortName {
+    switch (this) {
+      case AeroEngine.core: return 'AERO Core';
+      case AeroEngine.tinyllama: return 'TinyLlama';
+      case AeroEngine.apple: return 'Apple Intelligence';
+      case AeroEngine.ollama: return 'Ollama';
+    }
+  }
+  IconData get icon {
+    switch (this) {
+      case AeroEngine.core: return Icons.memory;
+      case AeroEngine.tinyllama: return Icons.phone_iphone;
+      case AeroEngine.apple: return Icons.auto_awesome;
+      case AeroEngine.ollama: return Icons.computer;
+    }
+  }
+  Color get color {
+    switch (this) {
+      case AeroEngine.core: return Colors.blueGrey;
+      case AeroEngine.tinyllama: return Colors.green;
+      case AeroEngine.apple: return Colors.deepPurple;
+      case AeroEngine.ollama: return Colors.orange;
+    }
+  }
+}
+
+/// Typed failure so the router can fall back and log the real reason to the Xcode console.
+enum AeroErrorKind { modelMissing, modelIncomplete, initFailed, timeout, empty, unavailable, network, unknown }
+
+class AeroException implements Exception {
+  final AeroErrorKind kind;
+  final String message;
+  AeroException(this.kind, this.message);
+  @override
+  String toString() => 'AeroException(${kind.name}): $message';
+}
+
+class AeroReply {
+  final String text;
+  final AeroEngine engine;
+  final String? note;
+  AeroReply(this.text, this.engine, {this.note});
+}
+
+class AeroMessage {
+  final bool isUser;
+  String text;
+  AeroEngine? engine;
+  bool streaming;
+  String? note;
+  AeroMessage({required this.isUser, required this.text, this.engine, this.streaming = false, this.note});
+}
+
+// --- Prompts: real time + Bible deep mode, shared by every engine ---
+class AeroPrompts {
+  static String realTime() => DateFormat('yyyy-MM-dd HH:mm:ss EEEE').format(DateTime.now());
+
+  static final RegExp _verseRef = RegExp(r'\b(?:[1-3]\s?)?(?:gen|genesis|exod|exodus|lev|num|deut|josh|judg|ruth|sam|samuel|kings|chron|ezra|neh|esther|job|ps|psalms?|prov|proverbs|eccl|song|isa|isaiah|jer|lam|ezek|dan|hos|joel|amos|obad|jonah|mic|nah|hab|zeph|hag|zech|mal|matt|matthew|mark|luke|john|acts|rom|romans|cor|corinthians|gal|eph|phil|col|thess|tim|titus|philem|heb|james|pet|peter|jude|rev)\.?\s\d{1,3}:\d{1,3}\b');
+  static const List<String> _bibleWords = [
+    'bible', 'verse', 'scripture', 'psalm', 'proverb', 'romans', 'genesis', 'exodus', 'gospel',
+    'jesus', 'christ', 'god', 'faith', 'pray', 'prayer', 'holy spirit', 'apostle', 'corinthians',
+    'ephesians', 'philippians', 'hebrews', 'isaiah', 'revelation', 'matthew', 'luke',
+  ];
+
+  static bool isBible(String text) {
+    final l = text.toLowerCase();
+    return _bibleWords.any(l.contains) || _verseRef.hasMatch(l);
+  }
+
+  static String system(String userText, {bool short = true}) {
+    final now = realTime();
+    final limit = short ? ' Keep answers under 150 words unless asked for more.' : '';
+    if (isBible(userText)) {
+      return 'You are AERO, Bible scholar and life coach inside Onyx Beacon for Caleb in Detroit. '
+          'Real time: $now (America/Detroit). Deep Bible knowledge: give book chapter:verse, '
+          'cross-references, original Greek/Hebrew when it helps, and practical Detroit lifestyle application. '
+          'Never invent verses; say so if unsure. Never guess the date — use the real time given.$limit';
+    }
+    return 'You are AERO, the private on-device assistant inside Onyx Beacon (habits, tasks, finance, writing) '
+        'for Caleb in Detroit. Real time: $now (America/Detroit). Be accurate, concise and practical. '
+        'Never guess the date — use the real time given.$limit';
+  }
+}
+
+// --- Persisted AERO settings (Ollama endpoint) — survives restarts, no extra package ---
+class AeroSettings {
+  static String ollamaUrl = (Platform.isIOS || Platform.isAndroid) ? 'http://192.168.1.15:11434' : 'http://localhost:11434';
+  static String ollamaModel = 'llama3';
+  static bool _loaded = false;
+
+  static Future<File> _file() async {
+    final dir = await getApplicationDocumentsDirectory();
+    final aeroDir = Directory(path.join(dir.path, 'AERO'));
+    if (!await aeroDir.exists()) await aeroDir.create(recursive: true);
+    return File(path.join(aeroDir.path, 'settings.json'));
+  }
+
+  static Future<void> load() async {
+    if (_loaded) return;
+    _loaded = true;
+    try {
+      final f = await _file();
+      if (!await f.exists()) return;
+      final data = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+      ollamaUrl = (data['ollamaUrl'] as String?)?.trim().isNotEmpty == true ? data['ollamaUrl'] as String : ollamaUrl;
+      ollamaModel = (data['ollamaModel'] as String?)?.trim().isNotEmpty == true ? data['ollamaModel'] as String : ollamaModel;
+    } catch (e) {
+      debugPrint('[AERO] settings load failed: $e');
+    }
+  }
+
+  static Future<void> save({required String url, required String model}) async {
+    ollamaUrl = url.trim().isEmpty ? ollamaUrl : url.trim();
+    ollamaModel = model.trim().isEmpty ? ollamaModel : model.trim();
+    try {
+      final f = await _file();
+      await f.writeAsString(jsonEncode({'ollamaUrl': ollamaUrl, 'ollamaModel': ollamaModel}));
+    } catch (e) {
+      debugPrint('[AERO] settings save failed: $e');
+    }
+  }
+}
+
+// --- Engine 3: Ollama (Surface on same Wi-Fi, or localhost on Windows) ---
 class AiCopilotService {
-  static String baseUrl = 'http://localhost:11434';
-  static String model = 'llama3';
+  static String get baseUrl => AeroSettings.ollamaUrl;
+  static String get model => AeroSettings.ollamaModel;
+
   static Future<bool> checkConnection() async {
     try {
       final res = await http.get(Uri.parse('$baseUrl/api/tags')).timeout(const Duration(seconds: 3));
       return res.statusCode == 200;
-    } catch(_) { return false; }
-  }
-  static Future<String> improveText(String text, {String instruction = 'Improve this writing, keep voice, fix grammar'}) async {
-    try {
-      final now = DateTime.now();
-      final realTime = DateFormat('yyyy-MM-dd HH:mm:ss EEEE').format(now);
-      final isBible = text.toLowerCase().contains('bible') || text.toLowerCase().contains('verse') || text.toLowerCase().contains('scripture') || text.toLowerCase().contains('psalm') || instruction.toLowerCase().contains('bible');
-      final sysAdd = isBible 
-        ? 'You are Onyx Beacon AERO Bible + Life Coach. Real time $realTime Detroit EST. Deep Bible knowledge, cross-references, original Greek/Hebrew when helpful, practical life application. Zero hallucination on dates.'
-        : 'You are Onyx Beacon AERO. Real time $realTime Detroit EST. Local-first, accurate, lifestyle + personal projects expert. MUST use real time provided.';
-      final prompt = '''$sysAdd
-
-$instruction
-
-$text''';
-      final res = await http.post(
-        Uri.parse('$baseUrl/api/generate'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'model': model, 'prompt': prompt, 'stream': false}),
-      ).timeout(const Duration(seconds: 60));
-      if(res.statusCode==200){
-        final data = jsonDecode(res.body);
-        return data['response'] ?? 'No response';
-      }
-      if(res.statusCode==404){
-        return "AI Error: 404 - model $model not found on $baseUrl. Run: ollama pull $model";
-      }
-      final snip = res.body.length>200 ? res.body.substring(0,200) : res.body;
-      return "AI Error: ${res.statusCode} - $snip";
-    } catch(e){ return "AI Offline: $e. Fix: OLLAMA_HOST=0.0.0.0 ollama serve + ollama run llama3 OR use on-device model"; }
-  }
-  static Future<String> summarize(String text) => improveText(text, instruction: 'Summarize this in 3 bullet points, keep key ideas');
-  static Future<String> expand(String text) => improveText(text, instruction: 'Expand this with vivid detail, keep same style, double length');
-  static Future<String> critique(String text) => improveText(text, instruction: 'Critique this as an editor: strengths, weaknesses, 3 specific improvements');
-  static Future<void> setCustomEndpoint(String url, String m) async {
-    baseUrl = url; model = m;
-  }
-}
-
-// --- AERO On-Device Service — True Phone Offline (TinyLlama) ---
-class AeroOnDeviceService {
-  static bool _downloading = false;
-  static double _downloadProgress = 0;
-  static String? _modelPath;
-  static const String _modelFileName = 'tinyllama-1.1b-chat.gguf';
-  static const String _modelUrl = 'https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf';
-
-  static bool get isDownloading => _downloading;
-  static double get downloadProgress => _downloadProgress;
-
-  static Future<String> _getModelPath() async {
-    if(_modelPath != null) return _modelPath!;
-    final dir = await getApplicationDocumentsDirectory();
-    final aeroDir = Directory(path.join(dir.path, 'AERO', 'models'));
-    if(!await aeroDir.exists()) await aeroDir.create(recursive: true);
-    _modelPath = path.join(aeroDir.path, _modelFileName);
-    return _modelPath!;
-  }
-
-  static Future<bool> checkModelExists() async {
-    try {
-      final p = await _getModelPath();
-      return await File(p).exists();
-    } catch(_){ return false; }
-  }
-
-  static Future<bool> downloadModel({Function(double)? onProgress}) async {
-    if(_downloading) return false;
-    try {
-      _downloading = true;
-      _downloadProgress = 0;
-      final savePath = await _getModelPath();
-      final file = File(savePath);
-      final request = http.Request('GET', Uri.parse(_modelUrl));
-      final streamed = await request.send();
-      final total = streamed.contentLength ?? 0;
-      int received = 0;
-      final sink = file.openWrite();
-      await for(var chunk in streamed.stream){
-        received += chunk.length;
-        sink.add(chunk);
-        if(total>0){
-          _downloadProgress = received/total;
-          onProgress?.call(_downloadProgress);
-        }
-      }
-      await sink.close();
-      _downloading = false;
-      _downloadProgress = 1.0;
-      return await file.exists();
-    } catch(e){
-      _downloading = false;
-      debugPrint('AERO download error: $e');
-      return false;
-    }
-  }
-
-  static Future<String> generateOnDevice(String prompt) async {
-    if (Platform.isWindows || Platform.isLinux) { 
-      return 'On-device TinyLlama is for iPhone/Android only. On Windows, use Ollama: ollama run llama3. Prompt: $prompt'; 
-    }
-    try {
-      final modelPath = await _getModelPath();
-      final file = File(modelPath);
-      if(!await file.exists()){
-        return 'AERO on-device model not downloaded yet. Tap settings → Download 600MB Model for true offline.';
-      }
-      final size = await file.length();
-      if(size < 500 * 1024 * 1024){
-        return 'AERO model file incomplete (${(size/1024/1024).toStringAsFixed(0)}MB < 600MB). Please delete and redownload 600MB model in settings.';
-      }
-      final lower = prompt.toLowerCase().trim();
-      if(lower == 'hi' || lower == 'hello' || lower == 'hey'){
-        return 'Hi Caleb — on-device real AI here! Model loaded (${(size/1024/1024).toStringAsFixed(0)}MB), VPN ON, offline. Ask me Bible, lifestyle, or projects. Real time: ${DateFormat('h:mm a, EEEE, MMM d, yyyy').format(DateTime.now())} Detroit.';
-      }
-      if(lower.contains('what time is it') || lower.contains('current time') || lower == 'time?' || lower.contains('what time')){
-        return 'Current time: ${DateFormat('h:mm a, EEEE, MMM d, yyyy').format(DateTime.now())} (on-device real AI, offline — Xfinity VPN ON ok, laptop not needed).';
-      }
-      if(lower.contains('summarize my last 7 days')){
-        try {
-          final db = await DatabaseHelper.instance.database;
-          final weekAgo = DateFormat('yyyy-MM-dd').format(DateTime.now().subtract(const Duration(days: 7)));
-          final comps = await db.query('habit_completions', where: 'completed_date >= ?', whereArgs: [weekAgo]);
-          final txs = await db.query('transactions', where: 'date >= ?', whereArgs: [weekAgo]);
-          final journals = await db.query('journal_entries', where: 'date >= ?', whereArgs: [weekAgo]);
-          return 'Last 7 days offline summary:\n'
-              '- Habits: ${comps.length} completions\n'
-              '- Finance: ${txs.length} transactions\n'
-              '- Writing: ${journals.length} entries\n'
-              '(Generated on-device, zero cloud, Xfinity VPN ON ok).';
-        } catch(_){}
-      }
-      return 'AERO on-device (TinyLlama 1.1B Q4 loaded, ${(size/1024/1024).toStringAsFixed(0)}MB): I received "$prompt". Local inference active on iPhone 13 / 17 Pro Max. Xfinity VPN ON ok.';
-    } catch(e){
-      return 'On-device error: $e';
-    }
-  }
-
-  static Future<void> deleteModel() async {
-    try {
-      final p = await _getModelPath();
-      final f = File(p);
-      if(await f.exists()) await f.delete();
-    } catch(_){}
-  }
-}
-
-// ==================== AERO ARCHITECTURE - APPLE INTELLIGENCE ====================
-class AeroEngineInfo {
-  final String id;
-  final String name;
-  final String subtitle;
-  final String description;
-  final String availability;
-  final IconData icon;
-  final Color color;
-  final bool isCore;
-
-  const AeroEngineInfo({
-    required this.id,
-    required this.name,
-    required this.subtitle,
-    required this.description,
-    required this.availability,
-    required this.icon,
-    required this.color,
-    this.isCore = false,
-  });
-}
-
-class AeroArchitectureService {
-  static List<AeroEngineInfo> getEngines({
-    required bool hasTinyLlamaModel,
-    required bool isOllamaOnline,
-    required bool isAppleIntelligenceAvailable,
-  }) {
-    return [
-      AeroEngineInfo(
-        id: 'core',
-        name: 'AERO Core',
-        subtitle: 'yours, always',
-        description: 'Your habit summaries, weekly review logic, journal context, local rule-based answers for time and 7-day stats. SQLite brain + your life data. Works 100% offline on ANY device.',
-        availability: 'Always available - iPhone 13, 17 Pro Max, Windows, offline',
-        icon: Icons.memory,
-        color: const Color(0xFF000000),
-        isCore: true,
-      ),
-      AeroEngineInfo(
-        id: 'tinyllama',
-        name: 'Engine 1 - TinyLlama',
-        subtitle: 'yours, your AI',
-        description: 'Runs on ANY iPhone, including your iPhone 13 and your mom\'s older iPhone. One-time 600MB download, then fully offline. This is your own AI. No API cost, no cloud, Xfinity VPN ON ok.',
-        availability: hasTinyLlamaModel ? 'Ready - model downloaded' : 'Needs 600MB download in Settings',
-        icon: Icons.phone_iphone,
-        color: const Color(0xFF45B7D1),
-      ),
-      AeroEngineInfo(
-        id: 'apple',
-        name: 'Engine 2 - Apple Intelligence',
-        subtitle: 'free, optional',
-        description: 'Only on iPhone 15 Pro+ / 17 Pro Max with iOS 18+ where Apple Intelligence is enabled. It\'s faster and free, no API cost. But it\'s optional — if it\'s not there, AERO just uses Engine 1.',
-        availability: isAppleIntelligenceAvailable ? 'Available - iOS 18+ detected' : 'Optional - iPhone 15 Pro+ / 17 Pro Max + iOS 18+',
-        icon: Icons.auto_awesome,
-        color: const Color(0xFFFF6B6B),
-      ),
-      AeroEngineInfo(
-        id: 'ollama',
-        name: 'Engine 3 - Ollama',
-        subtitle: 'your Surface Pro',
-        description: 'When you\'re home on same Wi-Fi, your PC can run Llama3 and your phone talks to 192.168.1.15:11434. More powerful, 7B+ params. Your Surface Pro becomes your private AI server.',
-        availability: isOllamaOnline ? 'Online - Surface reachable' : 'Offline - start ollama on Surface',
-        icon: Icons.computer,
-        color: const Color(0xFF96CEB4),
-      ),
-      AeroEngineInfo(
-        id: 'siri',
-        name: 'Engine 4 - Siri Shortcuts',
-        subtitle: 'for older iPhones',
-        description: 'For older iPhones, you can say "Hey Siri, ask AERO to summarize my week" — Siri just triggers your Engine 1 logic. No Apple Intelligence needed. Works via iOS Shortcuts app.',
-        availability: 'Setup in Shortcuts app - say "Hey Siri, AERO weekly summary"',
-        icon: Icons.mic,
-        color: const Color(0xFFFFEAA7),
-      ),
-    ];
-  }
-
-  static bool checkAppleIntelligenceAvailable() {
-    if (!Platform.isIOS) return false;
-    return false;
-  }
-
-  static Future<bool> checkTinyLlamaModel() async {
-    return await AeroOnDeviceService.checkModelExists();
-  }
-
-  static Future<bool> checkOllamaOnline() async {
-    return await AiCopilotService.checkConnection();
-  }
-}
-
-class AppleIntelligenceService {
-  static bool _isAvailable = false;
-  static bool get isAvailable => _isAvailable;
-
-  static Future<bool> checkAvailability() async {
-    try {
-      if (!Platform.isIOS) return false;
-      _isAvailable = AeroArchitectureService.checkAppleIntelligenceAvailable();
-      return _isAvailable;
     } catch (_) {
       return false;
     }
   }
 
-  static Future<String> generateWithAppleIntelligence(String prompt) async {
-    if (!await checkAvailability()) {
-      return await AeroOnDeviceService.generateOnDevice(prompt);
+  /// Throws [AeroException] on any failure so the router can fall back silently.
+  static Future<String> chat(String userText, {String? system}) async {
+    final http.Response res;
+    try {
+      res = await http
+          .post(
+            Uri.parse('$baseUrl/api/chat'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'model': model,
+              'stream': false,
+              'messages': [
+                {'role': 'system', 'content': system ?? AeroPrompts.system(userText, short: false)},
+                {'role': 'user', 'content': userText},
+              ],
+            }),
+          )
+          .timeout(const Duration(seconds: 90));
+    } on TimeoutException {
+      throw AeroException(AeroErrorKind.timeout, 'Ollama did not answer in 90s');
+    } catch (e) {
+      throw AeroException(AeroErrorKind.network, 'Ollama unreachable at $baseUrl ($e)');
     }
-    return '[Apple Intelligence] $prompt - placeholder, using TinyLlama fallback until native bridge implemented';
+    if (res.statusCode == 404) {
+      throw AeroException(AeroErrorKind.unavailable, 'Model "$model" not found on $baseUrl');
+    }
+    if (res.statusCode != 200) {
+      throw AeroException(AeroErrorKind.unknown, 'Ollama HTTP ${res.statusCode}');
+    }
+    final data = jsonDecode(res.body);
+    final text = (data['message']?['content'] ?? '').toString().trim();
+    if (text.isEmpty) throw AeroException(AeroErrorKind.empty, 'Ollama returned an empty answer');
+    return text;
   }
 }
+
+// --- Engine 2: Apple Intelligence (FoundationModels, iOS 26+, iPhone 15 Pro and newer) ---
+class AppleIntelligenceService {
+  static const MethodChannel _channel = MethodChannel('com.onyxbeacon/aero');
+
+  /// available | deviceNotEligible | appleIntelligenceNotEnabled | modelNotReady | osTooOld | sdkMissing | notIOS | bridgeMissing | error
+  static String status = 'unknown';
+
+  static Future<bool> checkAvailability() async {
+    if (!Platform.isIOS) {
+      status = 'notIOS';
+      return false;
+    }
+    try {
+      status = await _channel.invokeMethod<String>('appleIntelligenceStatus') ?? 'error';
+    } on MissingPluginException {
+      status = 'bridgeMissing';
+    } catch (e) {
+      debugPrint('[AERO] Apple Intelligence status check failed: $e');
+      status = 'error';
+    }
+    return status == 'available';
+  }
+
+  static String get statusLabel {
+    switch (status) {
+      case 'available': return 'Ready — on-device, private';
+      case 'deviceNotEligible': return 'This iPhone is not eligible (needs 15 Pro / 16 / 17 series)';
+      case 'appleIntelligenceNotEnabled': return 'Turn on in Settings → Apple Intelligence & Siri';
+      case 'modelNotReady': return 'Apple is still downloading its model — try later';
+      case 'osTooOld': return 'Needs iOS 26 or newer';
+      case 'sdkMissing': return 'App was built without the iOS 26 SDK (use Xcode 26 in CI)';
+      case 'bridgeMissing': return 'Native bridge not registered in this build';
+      case 'notIOS': return 'iPhone only';
+      default: return 'Checking…';
+    }
+  }
+
+  static Future<String> generateWithAppleIntelligence(String prompt, {String? instructions}) async {
+    try {
+      final text = await _channel.invokeMethod<String>('generate', {
+        'prompt': prompt,
+        'instructions': instructions ?? AeroPrompts.system(prompt),
+      });
+      if (text == null || text.trim().isEmpty) {
+        throw AeroException(AeroErrorKind.empty, 'Apple Intelligence returned an empty answer');
+      }
+      return text.trim();
+    } on PlatformException catch (e) {
+      throw AeroException(
+        e.code == 'UNAVAILABLE' ? AeroErrorKind.unavailable : AeroErrorKind.unknown,
+        'Apple Intelligence: ${e.message ?? e.code}',
+      );
+    } on MissingPluginException {
+      throw AeroException(AeroErrorKind.unavailable, 'Apple Intelligence bridge missing');
+    }
+  }
+}
+
+// --- Engine 1 + Core: on-device TinyLlama (works with VPN ON — it's a file, not a network call) ---
+class AeroOnDeviceService {
+  static const String modelFileName = 'tinyllama-1.1b-chat.gguf';
+  static const String modelUrl =
+      'https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf';
+  static const int minValidBytes = 400 * 1024 * 1024;
+
+  /// null = idle, 0..1 = downloading. UI listens to this from anywhere (chip, settings).
+  static final ValueNotifier<double?> downloadProgress = ValueNotifier<double?>(null);
+  static bool get isDownloading => downloadProgress.value != null;
+  static bool _warmedUp = false;
+  static String? _modelPath;
+
+  static Future<String> getModelPath() async {
+    if (_modelPath != null) return _modelPath!;
+    final dir = await getApplicationDocumentsDirectory();
+    final aeroDir = Directory(path.join(dir.path, 'AERO', 'models'));
+    if (!await aeroDir.exists()) await aeroDir.create(recursive: true);
+    _modelPath = path.join(aeroDir.path, modelFileName);
+    return _modelPath!;
+  }
+
+  static Future<bool> checkModelExists() async {
+    try {
+      final f = File(await getModelPath());
+      return await f.exists() && await f.length() > minValidBytes;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<int> getModelSizeMB() async {
+    try {
+      final f = File(await getModelPath());
+      if (!await f.exists()) return 0;
+      return await f.length() ~/ (1024 * 1024);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// Downloads to a .part file and only renames it when complete, so a killed download never looks valid.
+  static Future<bool> downloadModel() async {
+    if (isDownloading) return false;
+    downloadProgress.value = 0;
+    final client = http.Client();
+    File? part;
+    try {
+      final savePath = await getModelPath();
+      part = File('$savePath.part');
+      if (await part.exists()) await part.delete();
+      final streamed = await client.send(http.Request('GET', Uri.parse(modelUrl)));
+      if (streamed.statusCode != 200) {
+        throw AeroException(AeroErrorKind.network, 'Download HTTP ${streamed.statusCode}');
+      }
+      final total = streamed.contentLength ?? 0;
+      int received = 0;
+      final sink = part.openWrite();
+      try {
+        await for (final chunk in streamed.stream) {
+          received += chunk.length;
+          sink.add(chunk);
+          if (total > 0) downloadProgress.value = received / total;
+        }
+      } finally {
+        await sink.close();
+      }
+      if ((total > 0 && received != total) || received < minValidBytes) {
+        throw AeroException(AeroErrorKind.modelIncomplete, 'Got ${received ~/ (1024 * 1024)} MB of ${total ~/ (1024 * 1024)} MB');
+      }
+      final finalFile = File(savePath);
+      if (await finalFile.exists()) await finalFile.delete();
+      await part.rename(savePath);
+      _warmedUp = false;
+      return true;
+    } catch (e) {
+      debugPrint('[AERO] model download failed: $e');
+      try {
+        if (part != null && await part.exists()) await part.delete();
+      } catch (_) {}
+      return false;
+    } finally {
+      client.close();
+      downloadProgress.value = null;
+    }
+  }
+
+  static Future<void> deleteModel() async {
+    try {
+      final f = File(await getModelPath());
+      if (await f.exists()) await f.delete();
+      _warmedUp = false;
+    } catch (e) {
+      debugPrint('[AERO] delete model failed: $e');
+    }
+  }
+
+  static String _clock() => DateFormat('h:mm a, EEEE, MMM d, yyyy').format(DateTime.now());
+
+  static String _norm(String s) => s.toLowerCase().trim().replaceAll(RegExp(r'[!?.,]+$'), '').trim();
+
+  /// CORE — instant answers straight from the SQLite brain. Works on every device with no model and no network.
+  static Future<String?> coreFastPath(String prompt, {String engineLine = ''}) async {
+    final lower = _norm(prompt);
+    final timeStr = _clock();
+    final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
+    const greetings = {'hi', 'hello', 'hey', 'yo', 'hi aero', 'hey aero', 'hello aero', 'good morning', 'good afternoon', 'good evening'};
+
+    if (greetings.contains(lower)) {
+      int due = 0, pending = 0;
+      try {
+        final db = await DatabaseHelper.instance.database;
+        final habits = await db.query('habits');
+        final done = await db.query('habit_completions', where: 'completed_date = ?', whereArgs: [today]);
+        final doneIds = done.map((e) => e['habit_id']).toSet();
+        due = habits.where((h) => !doneIds.contains(h['id'])).length;
+        pending = (await db.query('tasks', where: 'isCompleted = 0')).length;
+      } catch (_) {}
+      final line = engineLine.isEmpty ? '' : ' Talking through $engineLine.';
+      return 'Hi Caleb — AERO here.$line It\'s $timeStr in Detroit. '
+          'From your SQLite brain: $due habit${due == 1 ? '' : 's'} left today, $pending task${pending == 1 ? '' : 's'} pending.';
+    }
+
+    if (lower.contains('what time') || lower.contains('current time') || lower == 'time' ||
+        lower.contains('what day is it') || lower.contains("what's the date") || lower.contains('what is the date') ||
+        lower.contains("today's date")) {
+      return 'Current time: $timeStr (AERO Core — device local, 100% offline, VPN ON ok).';
+    }
+
+    if (lower.contains('summarize my last 7 days') || lower.contains('summarize my week') ||
+        lower.contains('weekly summary') || lower.contains('last 7 days') || lower == 'my week') {
+      try {
+        final db = await DatabaseHelper.instance.database;
+        final weekAgo = DateFormat('yyyy-MM-dd').format(DateTime.now().subtract(const Duration(days: 7)));
+        final comps = await db.query('habit_completions', where: 'completed_date >= ?', whereArgs: [weekAgo]);
+        final txs = await db.query('transactions', where: 'date >= ?', whereArgs: [weekAgo]);
+        final journals = await db.query('journal_entries', where: 'date >= ?', whereArgs: [weekAgo]);
+        final doneTasks = await db.query('tasks', where: 'isCompleted = 1');
+        final openTasks = await db.query('tasks', where: 'isCompleted = 0');
+        double net = 0;
+        for (final t in txs) {
+          final amt = (t['amount'] as num).toDouble();
+          net += t['type'] == 'Income' ? amt : -amt;
+        }
+        int words = 0;
+        for (final j in journals) {
+          words += (j['content'] as String).split(RegExp(r'\s+')).where((w) => w.isNotEmpty).length;
+        }
+        return 'Last 7 days (AERO Core, offline):\n'
+            '• Habits: ${comps.length} completions\n'
+            '• Finance: ${txs.length} transactions, net \$${net.toStringAsFixed(2)}\n'
+            '• Writing: ${journals.length} entries, $words words\n'
+            '• Tasks: ${doneTasks.length} done, ${openTasks.length} open\n'
+            '($timeStr)';
+      } catch (e) {
+        return 'Couldn\'t read your week from SQLite: $e';
+      }
+    }
+
+    // The next shortcuts only fire for short, non-Bible questions so real questions reach the model.
+    if (AeroPrompts.isBible(prompt) || lower.length > 60) return null;
+
+    if (lower.contains('habit') && (lower.contains('today') || lower.contains('due') || lower.contains('left'))) {
+      try {
+        final db = await DatabaseHelper.instance.database;
+        final habits = await db.query('habits');
+        final done = await db.query('habit_completions', where: 'completed_date = ?', whereArgs: [today]);
+        final doneIds = done.map((e) => e['habit_id']).toSet();
+        final due = habits.where((h) => !doneIds.contains(h['id'])).map((h) => '• ${h['name']}').toList();
+        return due.isEmpty ? 'Every habit is done today. 🔥' : 'Habits left today:\n${due.join('\n')}';
+      } catch (_) {}
+    }
+
+    if (lower.contains('my tasks') || lower.contains('todo') || lower.contains('to do') ||
+        lower.contains('pending tasks') || lower.contains("what's on my list")) {
+      try {
+        final db = await DatabaseHelper.instance.database;
+        final open = await db.query('tasks', where: 'isCompleted = 0', limit: 12);
+        return open.isEmpty ? 'No pending tasks. 🎉' : 'Pending tasks:\n${open.map((t) => '• ${t['title']}').join('\n')}';
+      } catch (_) {}
+    }
+
+    if (lower.contains('spent') || lower.contains('spending') || lower.contains('balance') || lower.contains('budget')) {
+      try {
+        final db = await DatabaseHelper.instance.database;
+        final monthStart = DateFormat('yyyy-MM-01').format(DateTime.now());
+        final txs = await db.query('transactions', where: 'date >= ?', whereArgs: [monthStart]);
+        double inc = 0, exp = 0;
+        for (final t in txs) {
+          final amt = (t['amount'] as num).toDouble();
+          if (t['type'] == 'Income') { inc += amt; } else { exp += amt; }
+        }
+        return 'This month: income \$${inc.toStringAsFixed(2)}, spent \$${exp.toStringAsFixed(2)}, net \$${(inc - exp).toStringAsFixed(2)} (${txs.length} transactions).';
+      } catch (_) {}
+    }
+
+    if (lower == 'help' || lower.contains('what can you do')) {
+      return 'Instant (no model): "hi", "what time is it", "summarize my week", "habits left today", "my tasks", "how much have I spent".\n'
+          'Everything else — Bible study, writing help, planning — goes to the best engine on this phone.';
+    }
+    return null;
+  }
+
+  /// Engine 1 — streams cumulative text through [onPartial]. Throws [AeroException] with the real failure kind.
+  static Future<String> generateOnDevice(String prompt, {void Function(String partial)? onPartial}) async {
+    final modelPath = await getModelPath();
+    final file = File(modelPath);
+    if (!await file.exists()) throw AeroException(AeroErrorKind.modelMissing, 'No model file at $modelPath');
+    final size = await file.length();
+    if (size < minValidBytes) {
+      throw AeroException(AeroErrorKind.modelIncomplete, 'Model is only ${size ~/ (1024 * 1024)} MB');
+    }
+
+    final request = OpenAiRequest(
+      maxTokens: 400,
+      messages: [
+        Message(Role.system, AeroPrompts.system(prompt)),
+        Message(Role.user, prompt),
+      ],
+      numGpuLayers: (Platform.isIOS || Platform.isMacOS) ? 99 : 0,
+      modelPath: modelPath,
+      contextSize: 2048,
+      temperature: 0.4,
+      topP: 0.9,
+    );
+
+    final completer = Completer<String>();
+    String latest = '';
+    int? requestId;
+    try {
+      requestId = await fllamaChat(request, (String response, String openAiJson, bool done) {
+        if (completer.isCompleted) return;
+        if (done && response.startsWith('Error:')) {
+          completer.completeError(AeroException(AeroErrorKind.initFailed, response));
+          return;
+        }
+        if (response.isNotEmpty) {
+          latest = response;
+          onPartial?.call(latest);
+        }
+        if (done) completer.complete(latest);
+      });
+    } catch (e) {
+      throw AeroException(AeroErrorKind.initFailed, 'fllama could not start: $e');
+    }
+
+    // First load on a cold phone reads ~640 MB into memory; give it time, then stream.
+    final limit = _warmedUp ? const Duration(seconds: 60) : const Duration(seconds: 120);
+    try {
+      final result = await completer.future.timeout(limit);
+      _warmedUp = true;
+      if (result.trim().isEmpty) throw AeroException(AeroErrorKind.empty, 'TinyLlama returned an empty answer');
+      return result.trim();
+    } on TimeoutException {
+      if (requestId != null) fllamaCancelInference(requestId);
+      if (latest.trim().isNotEmpty) {
+        _warmedUp = true;
+        return '${latest.trim()}\n\n[stopped after ${limit.inSeconds}s]';
+      }
+      throw AeroException(AeroErrorKind.timeout, 'No tokens after ${limit.inSeconds}s');
+    }
+  }
+}
+
+// --- Engine catalogue for the architecture + settings dialogs (live status, not static text) ---
+class AeroEngineInfo {
+  final AeroEngine id;
+  final String name;
+  final String subtitle;
+  final String description;
+  final String availability;
+  final bool ready;
+  final bool active;
+  AeroEngineInfo({required this.id, required this.name, required this.subtitle, required this.description,
+      required this.availability, required this.ready, required this.active});
+  IconData get icon => id.icon;
+  Color get color => id.color;
+}
+
+class AeroArchitectureService {
+  static List<AeroEngineInfo> getEngines(AeroRouter r) {
+    final primary = r.primary;
+    return [
+      AeroEngineInfo(
+        id: AeroEngine.core, name: 'Core', subtitle: 'Always on • instant',
+        description: 'Greetings, time, weekly summary, habits left, tasks, spending — straight from SQLite. No model, no network.',
+        availability: 'Ready', ready: true, active: primary == AeroEngine.core,
+      ),
+      AeroEngineInfo(
+        id: AeroEngine.tinyllama, name: 'Engine 1 — TinyLlama', subtitle: 'Any iPhone • offline • VPN-proof',
+        description: '1.1B chat model stored on the phone. Downloaded once (~640 MB), then works in airplane mode.',
+        availability: r.hasModel ? '${r.modelSizeMB} MB on device' : (AeroOnDeviceService.isDownloading ? 'Downloading…' : 'Not downloaded'),
+        ready: r.hasModel, active: primary == AeroEngine.tinyllama,
+      ),
+      AeroEngineInfo(
+        id: AeroEngine.apple, name: 'Engine 2 — Apple Intelligence', subtitle: 'iPhone 15 Pro and newer • iOS 26',
+        description: "Apple's on-device foundation model through a native bridge. Free and private.",
+        availability: AppleIntelligenceService.statusLabel, ready: r.appleAvailable, active: primary == AeroEngine.apple,
+      ),
+      AeroEngineInfo(
+        id: AeroEngine.ollama, name: 'Engine 3 — Ollama', subtitle: 'Surface on the same Wi-Fi',
+        description: 'Bigger models on your PC. Used only when it is reachable; skipped silently otherwise.',
+        availability: r.ollamaOnline ? 'Online at ${AeroSettings.ollamaUrl}' : 'Not reachable', ready: r.ollamaOnline,
+        active: primary == AeroEngine.ollama,
+      ),
+    ];
+  }
+}
+
+// --- The router: detection, auto-pick, fallback, chat history (survives tab switches) ---
+class AeroRouter extends ChangeNotifier {
+  AeroRouter._();
+  static final AeroRouter instance = AeroRouter._();
+
+  bool hasModel = false;
+  int modelSizeMB = 0;
+  bool appleAvailable = false;
+  bool ollamaOnline = false;
+  bool detecting = false;
+  bool busy = false;
+  String deviceLabel = '';
+  DateTime? _lastDetect;
+  final List<AeroMessage> messages = [];
+
+  AeroEngine get primary {
+    if (hasModel) return AeroEngine.tinyllama;
+    if (appleAvailable) return AeroEngine.apple;
+    if (ollamaOnline) return AeroEngine.ollama;
+    return AeroEngine.core;
+  }
+
+  String get engineLabel {
+    switch (primary) {
+      case AeroEngine.core: return 'AERO Core • instant • offline';
+      case AeroEngine.tinyllama: return 'Engine 1 TinyLlama • $modelSizeMB MB • offline';
+      case AeroEngine.apple: return 'Engine 2 Apple Intelligence • on-device';
+      case AeroEngine.ollama: return 'Engine 3 Ollama • Surface';
+    }
+  }
+
+  /// Runs in the background on launch and on every resume. Never shows a dialog.
+  Future<void> detect({bool force = false}) async {
+    if (detecting) return;
+    if (!force && _lastDetect != null && DateTime.now().difference(_lastDetect!) < const Duration(seconds: 15)) return;
+    detecting = true;
+    notifyListeners();
+    try {
+      await AeroSettings.load();
+      final results = await Future.wait<Object>([
+        AeroOnDeviceService.checkModelExists(),
+        AeroOnDeviceService.getModelSizeMB(),
+        AppleIntelligenceService.checkAvailability(),
+        AiCopilotService.checkConnection(),
+        _deviceLabel(),
+      ]);
+      hasModel = results[0] as bool;
+      modelSizeMB = results[1] as int;
+      appleAvailable = results[2] as bool;
+      ollamaOnline = results[3] as bool;
+      deviceLabel = results[4] as String;
+      debugPrint('[AERO] detect: model=$hasModel ($modelSizeMB MB) apple=${AppleIntelligenceService.status} '
+          'ollama=$ollamaOnline device=$deviceLabel → $engineLabel');
+    } catch (e) {
+      debugPrint('[AERO] detect failed: $e');
+    } finally {
+      _lastDetect = DateTime.now();
+      detecting = false;
+      notifyListeners();
+    }
+  }
+
+  static Future<String> _deviceLabel() async {
+    try {
+      if (Platform.isIOS) {
+        final info = await DeviceInfoPlugin().iosInfo;
+        return '${info.utsname.machine} • iOS ${info.systemVersion}';
+      }
+      return Platform.operatingSystem;
+    } catch (_) {
+      return Platform.operatingSystem;
+    }
+  }
+
+  List<AeroEngine> get _modelOrder => [
+        if (hasModel) AeroEngine.tinyllama,
+        if (appleAvailable) AeroEngine.apple,
+        if (ollamaOnline) AeroEngine.ollama,
+      ];
+
+  Future<String> _run(AeroEngine e, String prompt, void Function(String)? onPartial) {
+    switch (e) {
+      case AeroEngine.tinyllama: return AeroOnDeviceService.generateOnDevice(prompt, onPartial: onPartial);
+      case AeroEngine.apple: return AppleIntelligenceService.generateWithAppleIntelligence(prompt);
+      case AeroEngine.ollama: return AiCopilotService.chat(prompt);
+      case AeroEngine.core: throw AeroException(AeroErrorKind.unavailable, 'Core has no model');
+    }
+  }
+
+  /// Tries each available model engine in priority order; falls back quietly. Never throws.
+  Future<AeroReply> ask(String prompt, {void Function(String partial)? onPartial, bool allowCore = true}) async {
+    if (allowCore) {
+      final core = await AeroOnDeviceService.coreFastPath(prompt, engineLine: engineLabel);
+      if (core != null) return AeroReply(core, AeroEngine.core);
+    }
+    final failures = <String>[];
+    for (final e in _modelOrder) {
+      try {
+        final text = await _run(e, prompt, onPartial);
+        return AeroReply(text, e, note: failures.isEmpty ? null : 'Fell back: ${failures.join('; ')}');
+      } on AeroException catch (ex) {
+        debugPrint('[AERO] ${e.shortName} failed → $ex');
+        failures.add('${e.shortName} ${ex.kind.name}');
+        if (ex.kind == AeroErrorKind.modelMissing || ex.kind == AeroErrorKind.modelIncomplete) {
+          hasModel = false;
+          notifyListeners();
+        }
+        if (e == AeroEngine.ollama) {
+          ollamaOnline = false;
+          notifyListeners();
+        }
+      } catch (ex) {
+        debugPrint('[AERO] ${e.shortName} crashed → $ex');
+        failures.add('${e.shortName} error');
+      }
+    }
+    final hint = AeroOnDeviceService.isDownloading
+        ? 'The offline model is downloading — once it finishes I can answer this fully.'
+        : 'That one needs a language model. Tap Download in the bar above once (~640 MB) and I\'ll answer anything offline, VPN on or off.';
+    return AeroReply(
+      'AERO Core: $hint\nInstant right now: "summarize my week", "habits left today", "my tasks", "what time is it".',
+      AeroEngine.core,
+      note: failures.isEmpty ? null : 'Tried: ${failures.join('; ')}',
+    );
+  }
+
+  /// Chat entry point: keeps history, streams into the last bubble.
+  Future<void> send(String text) async {
+    if (busy || text.trim().isEmpty) return;
+    busy = true;
+    messages.add(AeroMessage(isUser: true, text: text.trim()));
+    final bubble = AeroMessage(isUser: false, text: '', streaming: true);
+    messages.add(bubble);
+    notifyListeners();
+    try {
+      final reply = await ask(text.trim(), onPartial: (partial) {
+        bubble.text = partial;
+        notifyListeners();
+      });
+      bubble.text = reply.text;
+      bubble.engine = reply.engine;
+      bubble.note = reply.note;
+    } catch (e) {
+      bubble.text = 'AERO error: $e';
+      bubble.engine = AeroEngine.core;
+    } finally {
+      bubble.streaming = false;
+      busy = false;
+      notifyListeners();
+    }
+  }
+
+  /// Writing Hub helper — always goes to a model engine (no Core shortcuts). Long drafts are trimmed for TinyLlama's 2K context.
+  Future<AeroReply> assistWriting(String instruction, String text) {
+    final body = text.length > 4500 ? '${text.substring(0, 4500)}\n[…trimmed]' : text;
+    return ask('$instruction\n\n---\n$body', allowCore: false);
+  }
+
+  void clear() {
+    messages.clear();
+    notifyListeners();
+  }
+}
+
 
 // --- P2P Sync Service (Local Wi-Fi, zero cloud) ---
 class P2PSyncService {
@@ -900,14 +1376,106 @@ class WeeklyReviewService {
         pw.MultiPage(
           pageFormat: pdfLib.PdfPageFormat.a4,
           build: (ctx) => [
-            pw.Header(level: 0, child: pw.Text('Onyx Beacon — Weekly Life Review', style: pw.TextStyle(fontSize: 22, fontWeight: pw.FontWeight.bold))),
-            pw.Text('Period: $weekAgoStr to $todayStr — Generated: ${DateFormat('yyyy-MM-dd HH:mm').format(now)}', style: pw.TextStyle(fontSize: 10, color: pdfLib.PdfColors.grey)),
+            pw.Header(
+              level: 0,
+              child: pw.Text(
+                'Onyx Beacon — Weekly Life Review',
+                style: pw.TextStyle(
+                  fontSize: 22,
+                  fontWeight: pw.FontWeight.bold,
+                ),
+              ),
+            ),
+            pw.Text(
+              'Period: $weekAgoStr to $todayStr — '
+              'Generated: ${DateFormat('yyyy-MM-dd HH:mm').format(now)}',
+              style: pw.TextStyle(
+                fontSize: 10,
+                color: pdfLib.PdfColors.grey,
+              ),
+            ),
             pw.SizedBox(height: 12),
-            pw.Text('Executive Summary', style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
-            pw.Bullet(text: 'Habits Tracked: ${habits.length} — Completions This Week: ${completions.length}'),
-            pw.Bullet(text: 'Tasks: ${tasks.length} total, ${tasksCompleted.first['c']} completed'),
-            pw.Bullet(text: 'Finance: Income \$${income.toStringAsFixed(2)} — Expense \$${expense.toStringAsFixed(2)} — Net \$${(income-expense).toStringAsFixed(2)}'),
-            pw.Bullet(text: 'Writing: ${journals.length} entries — $totalWords words'),
+            pw.Text(
+              'Executive Summary',
+              style: pw.TextStyle(
+                fontSize: 16,
+                fontWeight: pw.FontWeight.bold,
+              ),
+            ),
+            pw.Bullet(
+              text: 'Habits Tracked: ${habits.length} — '
+              'Completions This Week: ${completions.length}',
+            ),
+            pw.Bullet(
+              text: 'Tasks: ${tasks.length} total, '
+              '${tasksCompleted.first['c']} completed',
+            ),
+            pw.Bullet(
+              text: 'Finance: Income \$${income.toStringAsFixed(2)} — '
+              'Expense \$${expense.toStringAsFixed(2)} — '
+              'Net \$${(income-expense).toStringAsFixed(2)}',
+            ),
+            pw.Bullet(
+              text: 'Writing: ${journals.length} entries — '
+              '$totalWords words',
+            ),
+            pw.SizedBox(height: 16),
+            pw.Text(
+              'Habit Completions',
+              style: pw.TextStyle(
+                fontSize: 14,
+                fontWeight: pw.FontWeight.bold,
+              ),
+            ),
+            pw.Table.fromTextArray(
+              headers: ['Habit','Completions This Week'],
+              data: habits.map((h){
+                final count = completions.where(
+                  (c)=>c['habit_id']==h['id']
+                ).length;
+                return [h['name'], count.toString()];
+              }).toList(),
+            ),
+            pw.SizedBox(height: 12),
+            pw.Text(
+              'Finance Ledger — Past 7 Days',
+              style: pw.TextStyle(
+                fontSize: 14,
+                fontWeight: pw.FontWeight.bold,
+              ),
+            ),
+            pw.Table.fromTextArray(
+              headers: ['Date','Title','Type','Amount','Category'],
+              data: txs.map((t)=>[
+                t['date'],
+                t['title'],
+                t['type'],
+                '\$${t['amount']}',
+                t['category']
+              ]).toList(),
+            ),
+            pw.SizedBox(height: 12),
+            pw.Text(
+              'Writing Output',
+              style: pw.TextStyle(
+                fontSize: 14,
+                fontWeight: pw.FontWeight.bold,
+              ),
+            ),
+            pw.Table.fromTextArray(
+              headers: ['Date','Title','Category','Words'],
+              data: journals.map((j){
+                final wc = (j['content'] as String).split(
+                  RegExp(r'\s+')
+                ).length;
+                return [
+                  j['date'],
+                  j['title'],
+                  j['category'],
+                  wc.toString()
+                ];
+              }).toList(),
+            ),
           ],
         ),
       );
@@ -930,11 +1498,24 @@ class WeeklyReviewService {
 }
 
 // ==================== COLOR CODES + DAILY BRIEFING WIDGET ====================
+
 class ColorCodes {
   static const List<String> palette = [
-    '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7',
-    '#DDA0DD', '#98D8C8', '#F7DC6F', '#BB8FCE', '#85C1E2',
-    '#F8B500', '#6C5CE7', '#A29BFE', '#FD79A8', '#FDCB6E',
+    '#FF6B6B',
+    '#4ECDC4',
+    '#45B7D1',
+    '#96CEB4',
+    '#FFEAA7',
+    '#DDA0DD',
+    '#98D8C8',
+    '#F7DC6F',
+    '#BB8FCE',
+    '#85C1E2',
+    '#F8B500',
+    '#6C5CE7',
+    '#A29BFE',
+    '#FD79A8',
+    '#FDCB6E',
   ];
   static Color fromHex(String hex) {
     try {
@@ -983,59 +1564,95 @@ class _DailyBriefingWidgetState extends State<DailyBriefingWidget> {
     showDialog(context: context, builder: (ctx) => AlertDialog(
       title: Text('Habits Due Today ($habitsDue)'),
       content: SizedBox(
-        width: 320, height: 320,
-        child: dueHabits.isEmpty ? const Center(child: Text('All habits done! 🎉')) : ListView.builder(
-          itemCount: dueHabits.length,
-          itemBuilder: (c,i){
-            final habit = dueHabits[i];
-            return ListTile(
-              leading: Container(width: 10, height: 10, decoration: BoxDecoration(color: ColorCodes.fromHex(habit['color'] ?? '#FF6B6B'), shape: BoxShape.circle)),
-              title: Text(habit['name']),
-              trailing: IconButton(
-                icon: const Icon(Icons.check_circle_outline),
-                onPressed: () async {
-                  final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
-                  await DatabaseHelper.instance.toggleHabitCompletion(habit['id'] as int, today);
-                  Navigator.pop(ctx);
-                  _load();
-                  if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${habit['name']} done! 🔥')));
-                },
-              ),
-            );
-          },
-        ),
+        width: 320,
+        height: 320,
+        child: dueHabits.isEmpty
+          ? const Center(child: Text('All habits done! 🎉'))
+          : ListView.builder(
+              itemCount: dueHabits.length,
+              itemBuilder: (c,i){
+                final habit = dueHabits[i];
+                return ListTile(
+                  leading: Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: ColorCodes.fromHex(habit['color'] ?? '#FF6B6B'),
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  title: Text(habit['name']),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.check_circle_outline),
+                    onPressed: () async {
+                      final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
+                      await DatabaseHelper.instance.toggleHabitCompletion(habit['id'] as int, today);
+                      Navigator.pop(ctx);
+                      _load();
+                      if(mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('${habit['name']} done! 🔥')),
+                        );
+                      }
+                    },
+                  ),
+                );
+              },
+            ),
       ),
-      actions: [TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text('Close'))],
+      actions: [
+        TextButton(
+          onPressed: ()=>Navigator.pop(ctx),
+          child: const Text('Close'),
+        ),
+      ],
     ));
   }
   void _showPendingTasksDialog() {
     showDialog(context: context, builder: (ctx) => AlertDialog(
       title: Text('Tasks Pending ($tasksPending)'),
       content: SizedBox(
-        width: 320, height: 320,
-        child: pendingTasks.isEmpty ? const Center(child: Text('No pending tasks!')) : ListView.builder(
-          itemCount: pendingTasks.length,
-          itemBuilder: (c,i){
-            final task = pendingTasks[i];
-            return ListTile(
-              leading: const Icon(Icons.task_alt_outlined),
-              title: Text(task['title']),
-              trailing: IconButton(
-                icon: const Icon(Icons.check_box_outline_blank),
-                onPressed: () async {
-                  await DatabaseHelper.instance.updateTaskCompletion(task['id'] as int, 1);
-                  Navigator.pop(ctx);
-                  _load();
-                  if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${task['title']} completed!')));
-                },
-              ),
-            );
-          },
-        ),
+        width: 320,
+        height: 320,
+        child: pendingTasks.isEmpty
+          ? const Center(child: Text('No pending tasks!'))
+          : ListView.builder(
+              itemCount: pendingTasks.length,
+              itemBuilder: (c,i){
+                final task = pendingTasks[i];
+                return ListTile(
+                  leading: const Icon(Icons.task_alt_outlined),
+                  title: Text(task['title']),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.check_box_outline_blank),
+                    onPressed: () async {
+                      await DatabaseHelper.instance.updateTaskCompletion(task['id'] as int, 1);
+                      Navigator.pop(ctx);
+                      _load();
+                      if(mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('${task['title']} completed!')),
+                        );
+                      }
+                    },
+                  ),
+                );
+              },
+            ),
       ),
       actions: [
-        TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text('Close')),
-        if(pendingTasks.isNotEmpty) TextButton(onPressed: (){ Navigator.pop(ctx); widget.onNavigateToTab?.call(2); }, child: const Text('Go to Tasks')),
+        TextButton(
+          onPressed: ()=>Navigator.pop(ctx),
+          child: const Text('Close'),
+        ),
+        if(pendingTasks.isNotEmpty)
+          TextButton(
+            onPressed: (){
+              Navigator.pop(ctx);
+              widget.onNavigateToTab?.call(2);
+            },
+            child: const Text('Go to Tasks'),
+          ),
       ],
     ));
   }
@@ -1052,9 +1669,16 @@ class _DailyBriefingWidgetState extends State<DailyBriefingWidget> {
               children:[
                 const Icon(Icons.wb_sunny_outlined, size: 18),
                 const SizedBox(width: 6),
-                const Text('Daily Briefing — Today (Tap to act)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                const Text(
+                  'Daily Briefing — Today (Tap to act)',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                ),
                 const Spacer(),
-                IconButton(icon: const Icon(Icons.refresh, size: 16), onPressed: _load, tooltip: 'Refresh'),
+                IconButton(
+                  icon: const Icon(Icons.refresh, size: 16),
+                  onPressed: _load,
+                  tooltip: 'Refresh',
+                ),
               ],
             ),
             const SizedBox(height: 8),
@@ -1066,10 +1690,20 @@ class _DailyBriefingWidgetState extends State<DailyBriefingWidget> {
                     borderRadius: BorderRadius.circular(8),
                     child: Column(
                       children:[
-                        const Icon(Icons.bolt, color: Colors.orange, size: 18),
-                        Text('$habitsDue', style: const TextStyle(fontWeight: FontWeight.bold)),
-                        const Text('Habits Due', style: TextStyle(fontSize: 10, color: Colors.grey)),
-                        if(habitsDue > 0) const Text('Tap to complete', style: TextStyle(fontSize: 8, color: Colors.orange)),
+                        Icon(Icons.bolt, color: Colors.orange, size: 18),
+                        Text(
+                          '$habitsDue',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        const Text(
+                          'Habits Due',
+                          style: TextStyle(fontSize: 10, color: Colors.grey),
+                        ),
+                        if(habitsDue > 0)
+                          const Text(
+                            'Tap to complete',
+                            style: TextStyle(fontSize: 8, color: Colors.orange),
+                          ),
                       ],
                     ),
                   ),
@@ -1080,10 +1714,20 @@ class _DailyBriefingWidgetState extends State<DailyBriefingWidget> {
                     borderRadius: BorderRadius.circular(8),
                     child: Column(
                       children:[
-                        const Icon(Icons.task_alt, color: Colors.blue, size: 18),
-                        Text('$tasksPending', style: const TextStyle(fontWeight: FontWeight.bold)),
-                        const Text('Tasks', style: TextStyle(fontSize: 10, color: Colors.grey)),
-                        if(tasksPending > 0) const Text('Tap to view', style: TextStyle(fontSize: 8, color: Colors.blue)),
+                        Icon(Icons.task_alt, color: Colors.blue, size: 18),
+                        Text(
+                          '$tasksPending',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        const Text(
+                          'Tasks',
+                          style: TextStyle(fontSize: 10, color: Colors.grey),
+                        ),
+                        if(tasksPending > 0)
+                          const Text(
+                            'Tap to view',
+                            style: TextStyle(fontSize: 8, color: Colors.blue),
+                          ),
                       ],
                     ),
                   ),
@@ -1094,10 +1738,22 @@ class _DailyBriefingWidgetState extends State<DailyBriefingWidget> {
                     borderRadius: BorderRadius.circular(8),
                     child: Column(
                       children:[
-                        const Icon(Icons.account_balance_wallet, color: Colors.green, size: 18),
-                        Text('\$${netToday.toStringAsFixed(0)}', style: TextStyle(fontWeight: FontWeight.bold, color: netToday>=0?Colors.green:Colors.red)),
-                        const Text('Net Today', style: TextStyle(fontSize: 10, color: Colors.grey)),
-                        const Text('Tap for Finance', style: TextStyle(fontSize: 8, color: Colors.green)),
+                        Icon(Icons.account_balance_wallet, color: Colors.green, size: 18),
+                        Text(
+                          '\$${netToday.toStringAsFixed(0)}',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: netToday>=0?Colors.green:Colors.red,
+                          ),
+                        ),
+                        const Text(
+                          'Net Today',
+                          style: TextStyle(fontSize: 10, color: Colors.grey),
+                        ),
+                        const Text(
+                          'Tap for Finance',
+                          style: TextStyle(fontSize: 8, color: Colors.green),
+                        ),
                       ],
                     ),
                   ),
@@ -1112,6 +1768,7 @@ class _DailyBriefingWidgetState extends State<DailyBriefingWidget> {
 }
 
 // ==================== APP SHELL & NAVIGATION ====================
+
 class MainDashboardShell extends StatefulWidget {
   const MainDashboardShell({super.key});
 
@@ -1119,18 +1776,28 @@ class MainDashboardShell extends StatefulWidget {
   State<MainDashboardShell> createState() => _MainDashboardShellState();
 }
 
-class _MainDashboardShellState extends State<MainDashboardShell> {
+
+class _MainDashboardShellState extends State<MainDashboardShell> with WidgetsBindingObserver {
   int _currentIndex = 0;
   void setTab(int idx){ setState(()=>_currentIndex = idx); }
-  final List<Widget> _pages = const [
-    DashboardHomeTab(),
-    HabitsTab(),
-    TasksTab(),
-    FinanceTab(),
-    JournalTab(),
-    AiChatTab(),
-    GalleryTab(),
-    GameTab(),
+  @override
+  void initState(){ super.initState(); WidgetsBinding.instance.addObserver(this); }
+  @override
+  void dispose(){ WidgetsBinding.instance.removeObserver(this); super.dispose(); }
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state){
+    // Coming back from Settings (Apple Intelligence toggle), VPN change, or Wi-Fi change → re-pick engine.
+    if(state == AppLifecycleState.resumed){ AeroRouter.instance.detect(); }
+  }
+  List<Widget> get _pages => [
+    DashboardHomeTab(onNavigateToTab: setTab),
+    const HabitsTab(),
+    const TasksTab(),
+    const FinanceTab(),
+    const JournalTab(),
+    const AiChatTab(),
+    const GalleryTab(),
+    const GameTab(),
   ];
   Widget _buildFixedTab(BuildContext context, int index, IconData icon, String label, bool selected){
     return InkWell(onTap: ()=>setState(()=>_currentIndex=index), child: Container(padding: const EdgeInsets.symmetric(horizontal:18, vertical:8), decoration: BoxDecoration(color: selected ? Colors.black : Colors.transparent, borderRadius: BorderRadius.circular(12)), child: Column(mainAxisSize: MainAxisSize.min, children:[Icon(icon, size:22, color: selected ? Colors.white : Colors.grey.shade700), const SizedBox(height:2), Text(label, style: TextStyle(fontSize:10, fontWeight: FontWeight.w600, color: selected ? Colors.white : Colors.grey.shade700))])) );
@@ -1161,9 +1828,11 @@ class _MainDashboardShellState extends State<MainDashboardShell> {
   }
 }
 
-// ==================== 1. COMMAND DASHBOARD TAB ====================
+
+// ==================== 1. COMMAND DASHBOARD TAB (PUSH 4 Sovereign) ====================
 class DashboardHomeTab extends StatefulWidget {
-  const DashboardHomeTab({super.key});
+  final void Function(int)? onNavigateToTab;
+  const DashboardHomeTab({super.key, this.onNavigateToTab});
 
   @override
   State<DashboardHomeTab> createState() => _DashboardHomeTabState();
@@ -1179,6 +1848,7 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
   int _journalCount = 0;
   double _weeklyNet = 0;
   int _weeklyWords = 0;
+  List<Map<String, dynamic>> _recentCompletions = [];
 
   @override
   void initState() {
@@ -1211,7 +1881,8 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
       final journals = await db.query('journal_entries', where: 'date >= ?', whereArgs: [weekAgo]);
       int words = 0;
       for(var j in journals){ words += (j['content'] as String).split(RegExp(r'\s+')).length; }
-      setState((){ _weeklyNet = net; _weeklyWords = words; });
+      final completions = await db.query('habit_completions', where: 'completed_date >= ?', whereArgs: [weekAgo], orderBy: 'completed_date DESC', limit: 10);
+      setState((){ _weeklyNet = net; _weeklyWords = words; _recentCompletions = completions; });
     } catch(_){}
   }
 
@@ -1251,7 +1922,7 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
             children: [
               const Text('Welcome back, Caleb.', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
               const SizedBox(height: 16),
-              const DailyBriefingWidget(),
+              DailyBriefingWidget(onNavigateToTab: widget.onNavigateToTab),
               const SizedBox(height: 12),
               TextField(
                 controller: _searchController,
@@ -1299,9 +1970,10 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
               const HabitHeatmapWidget(),
               const SizedBox(height: 16),
               const WeeklyReviewCard(),
+              const SizedBox(height: 12),
               const P2PSyncCard(),
               const SizedBox(height: 12),
-              const AiCopilotStatusCard(),
+              AeroStatusCard(onOpen: () => widget.onNavigateToTab?.call(5)),
               const SizedBox(height: 12),
               Card(
                 child: ListTile(
@@ -1321,6 +1993,7 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
     );
   }
 
+
   void _showEncryptedDialog(BuildContext context){
     final c = TextEditingController();
     showDialog(context: context, builder: (ctx)=>AlertDialog(
@@ -1329,7 +2002,6 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
       actions:[TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text('Cancel')), ElevatedButton(onPressed: (){ if(c.text.trim().length>=4){ Navigator.pop(ctx); ExportService.exportEncryptedBackup(c.text.trim()); }}, child: const Text('Encrypt & Export'))],
     ));
   }
-
   List<Widget> _buildSearchResults() {
     if (_searchResults == null) return [];
     final List<Widget> widgets = [];
@@ -1347,13 +2019,21 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
   }
 }
 
+
+
 class MetricCard extends StatelessWidget {
   final String title;
   final String value;
   final IconData icon;
   final Color color;
 
-  const MetricCard({super.key, required this.title, required this.value, required this.icon, required this.color});
+  const MetricCard({
+    super.key,
+    required this.title,
+    required this.value,
+    required this.icon,
+    required this.color,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1370,7 +2050,13 @@ class MetricCard extends StatelessWidget {
               children: [
                 Icon(icon, color: color, size: 18),
                 const SizedBox(width: 6),
-                Expanded(child: Text(title, style: const TextStyle(fontSize: 12, color: Colors.grey), overflow: TextOverflow.ellipsis)),
+                Expanded(
+                  child: Text(
+                    title,
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 8),
@@ -1382,7 +2068,7 @@ class MetricCard extends StatelessWidget {
   }
 }
 
-// ==================== 2. HABITS TAB ====================
+// ==================== 2. HABITS TAB (with Streaks + Heatmap) ====================
 class HabitsTab extends StatefulWidget {
   const HabitsTab({super.key});
 
@@ -1420,33 +2106,58 @@ class _HabitsTabState extends State<HabitsTab> {
     });
   }
 
-  void _showHabitDialog({int? id, String? initialName}) {
+  void _showHabitDialog({int? id, String? initialName, String? initialColor}) {
     final controller = TextEditingController(text: initialName ?? '');
     final isEditing = id != null;
+    String selectedColor = initialColor ?? ColorCodes.palette[_habits.length % ColorCodes.palette.length];
     showDialog(
       context: context,
-      builder: (BuildContext context) => AlertDialog(
+      builder: (BuildContext context) => StatefulBuilder(builder: (context, setDialogState) => AlertDialog(
         title: Text(isEditing ? 'Edit Habit' : 'New Habit'),
-        content: TextField(controller: controller, decoration: const InputDecoration(hintText: 'Enter habit name'), autofocus: true),
+        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          TextField(
+            controller: controller,
+            decoration: const InputDecoration(hintText: 'Enter habit name'),
+            autofocus: !isEditing,
+          ),
+          const SizedBox(height: 14),
+          const Text('Color', style: TextStyle(fontSize: 12, color: Colors.grey)),
+          const SizedBox(height: 6),
+          Wrap(spacing: 8, runSpacing: 8, children: ColorCodes.palette.map((hex) {
+            final selected = hex == selectedColor;
+            return GestureDetector(
+              onTap: () => setDialogState(() => selectedColor = hex),
+              child: Container(
+                width: 28, height: 28,
+                decoration: BoxDecoration(
+                  color: ColorCodes.fromHex(hex),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: selected ? Colors.black : Colors.transparent, width: 2.5),
+                ),
+                child: selected ? const Icon(Icons.check, size: 16, color: Colors.white) : null,
+              ),
+            );
+          }).toList()),
+        ]),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
           ElevatedButton(
             onPressed: () async {
               final habitName = controller.text.trim();
               if (habitName.isNotEmpty) {
-                if (isEditing) {
-                  await DatabaseHelper.instance.updateHabit(id, habitName);
+                if (id != null) {
+                  await DatabaseHelper.instance.updateHabit(id, habitName, color: selectedColor);
                 } else {
-                  await DatabaseHelper.instance.insertHabit(habitName);
+                  await DatabaseHelper.instance.insertHabit(habitName, color: selectedColor);
                 }
                 await _refreshHabits();
-                if (mounted) Navigator.pop(context);
+                if (context.mounted) Navigator.pop(context);
               }
             },
             child: Text(isEditing ? 'Save' : 'Add'),
           ),
         ],
-      ),
+      )),
     );
   }
 
@@ -1467,7 +2178,10 @@ class _HabitsTabState extends State<HabitsTab> {
             icon: const Icon(Icons.file_download),
             tooltip: 'Export Habits JSON',
             onPressed: () async {
-              final data = {'habits': _habits, 'completions': _completionsMap};
+              final data = {
+                'habits': _habits,
+                'completions': _completionsMap,
+              };
               await ExportService.exportJson('habits_${DateFormat('yyyy-MM-dd').format(DateTime.now())}.json', data);
             },
           ),
@@ -1479,7 +2193,12 @@ class _HabitsTabState extends State<HabitsTab> {
             padding: const EdgeInsets.all(12),
             child: TextField(
               controller: _searchController,
-              decoration: InputDecoration(hintText: 'Search habits...', prefixIcon: const Icon(Icons.search), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)), isDense: true),
+              decoration: InputDecoration(
+                hintText: 'Search habits...',
+                prefixIcon: const Icon(Icons.search),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                isDense: true,
+              ),
               onChanged: (v) => setState(() => _searchQuery = v),
             ),
           ),
@@ -1487,6 +2206,7 @@ class _HabitsTabState extends State<HabitsTab> {
             child: filtered.isEmpty
                 ? const Center(child: Text('No habits recorded yet. Tap + to add one.'))
                 : ListView.builder(
+                    padding: const EdgeInsets.only(bottom: 96),
                     itemCount: filtered.length,
                     itemBuilder: (context, index) {
                       final habit = filtered[index];
@@ -1504,17 +2224,38 @@ class _HabitsTabState extends State<HabitsTab> {
                             children: [
                               Row(
                                 children: [
-                                  Row(
+                                  Expanded(child: Row(
                                     children: [
-                                      Container(width: 10, height: 10, decoration: BoxDecoration(color: ColorCodes.fromHex(habit['color'] ?? '#FF6B6B'), shape: BoxShape.circle)),
+                                      Container(
+                                        width: 10,
+                                        height: 10,
+                                        decoration: BoxDecoration(
+                                          color: ColorCodes.fromHex(habit['color'] ?? '#FF6B6B'),
+                                          shape: BoxShape.circle,
+                                        ),
+                                      ),
                                       const SizedBox(width: 8),
-                                      Expanded(child: Text(habit['name'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16))),
+                                      Expanded(
+                                        child: Text(
+                                          habit['name'],
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 16,
+                                          ),
+                                        ),
+                                      ),
                                     ],
+                                  )),
+                                  Chip(
+                                    label: Text('🔥 $streak streak', style: const TextStyle(fontSize: 12)),
+                                    visualDensity: VisualDensity.compact,
+                                    backgroundColor: streak > 0 ? Colors.orange.shade100 : null,
                                   ),
-                                  Chip(label: Text('🔥 $streak streak', style: const TextStyle(fontSize: 12)), visualDensity: VisualDensity.compact, backgroundColor: streak > 0 ? Colors.orange.shade100 : null),
                                 ],
                               ),
                               const SizedBox(height: 8),
+                              // Heatmap last 14 days
                               SizedBox(
                                 height: 30,
                                 child: ListView.builder(
@@ -1525,14 +2266,20 @@ class _HabitsTabState extends State<HabitsTab> {
                                     final dateStr = DateFormat('yyyy-MM-dd').format(date);
                                     final isDone = completions.contains(dateStr);
                                     return Container(
-                                      width: 22, height: 22,
+                                      width: 22,
+                                      height: 22,
                                       margin: const EdgeInsets.only(right: 4),
                                       decoration: BoxDecoration(
                                         color: isDone ? Colors.green : Colors.grey.shade300,
                                         borderRadius: BorderRadius.circular(4),
                                         border: dateStr == todayStr ? Border.all(color: Colors.blue, width: 2) : null,
                                       ),
-                                      child: Center(child: Text(DateFormat('d').format(date), style: TextStyle(fontSize: 8, color: isDone ? Colors.white : Colors.black54))),
+                                      child: Center(
+                                        child: Text(
+                                          DateFormat('d').format(date),
+                                          style: TextStyle(fontSize: 8, color: isDone ? Colors.white : Colors.black54),
+                                        ),
+                                      ),
                                     );
                                   },
                                 ),
@@ -1543,14 +2290,26 @@ class _HabitsTabState extends State<HabitsTab> {
                                 children: [
                                   Row(
                                     children: [
-                                      IconButton(icon: const Icon(Icons.edit, color: Colors.blue, size: 20), onPressed: () => _showHabitDialog(id: habit['id'], initialName: habit['name'])),
-                                      IconButton(icon: const Icon(Icons.delete, color: Colors.red, size: 20), onPressed: () async { await DatabaseHelper.instance.deleteHabit(habit['id']); await _refreshHabits(); }),
+                                      IconButton(
+                                        icon: const Icon(Icons.edit, color: Colors.blue, size: 20),
+                                        onPressed: () => _showHabitDialog(id: habit['id'], initialName: habit['name'], initialColor: habit['color'] as String?),
+                                      ),
+                                      IconButton(
+                                        icon: const Icon(Icons.delete, color: Colors.red, size: 20),
+                                        onPressed: () async {
+                                          await DatabaseHelper.instance.deleteHabit(habit['id']);
+                                          await _refreshHabits();
+                                        },
+                                      ),
                                     ],
                                   ),
                                   ElevatedButton.icon(
                                     icon: Icon(doneToday ? Icons.check_circle : Icons.circle_outlined, size: 18),
                                     label: Text(doneToday ? 'Done Today' : 'Mark Today'),
-                                    style: ElevatedButton.styleFrom(backgroundColor: doneToday ? Colors.green : null, foregroundColor: doneToday ? Colors.white : null),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: doneToday ? Colors.green : null,
+                                      foregroundColor: doneToday ? Colors.white : null,
+                                    ),
                                     onPressed: () => _toggleToday(id),
                                   ),
                                 ],
@@ -1564,12 +2323,15 @@ class _HabitsTabState extends State<HabitsTab> {
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton(onPressed: () => _showHabitDialog(), child: const Icon(Icons.add)),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => _showHabitDialog(),
+        child: const Icon(Icons.add),
+      ),
     );
   }
 }
 
-// ==================== 3. TASKS TAB ====================
+// ==================== 3. TASKS TAB (with Search) ====================
 class TasksTab extends StatefulWidget {
   const TasksTab({super.key});
 
@@ -1591,9 +2353,13 @@ class _TasksTabState extends State<TasksTab> {
   Future<void> _refreshTasks() async {
     try {
       final tasks = await DatabaseHelper.instance.getTasks();
-      setState(() { _tasks = tasks; });
+      setState(() {
+        _tasks = tasks;
+      });
     } catch (e) {
-      setState(() { _tasks = []; });
+      setState(() {
+        _tasks = [];
+      });
     }
   }
 
@@ -1604,7 +2370,11 @@ class _TasksTabState extends State<TasksTab> {
       context: context,
       builder: (BuildContext context) => AlertDialog(
         title: Text(isEditing ? 'Edit Task' : 'New Task'),
-        content: TextField(controller: controller, decoration: const InputDecoration(hintText: 'Enter task description'), autofocus: true),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(hintText: 'Enter task description'),
+          autofocus: true,
+        ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
           ElevatedButton(
@@ -1634,7 +2404,13 @@ class _TasksTabState extends State<TasksTab> {
       appBar: AppBar(
         title: const Text('Tasks & To-dos'),
         actions: [
-          IconButton(icon: const Icon(Icons.file_download), tooltip: 'Export Tasks', onPressed: () async { await ExportService.exportJson('tasks_${DateFormat('yyyy-MM-dd').format(DateTime.now())}.json', _tasks); }),
+          IconButton(
+            icon: const Icon(Icons.file_download),
+            tooltip: 'Export Tasks',
+            onPressed: () async {
+              await ExportService.exportJson('tasks_${DateFormat('yyyy-MM-dd').format(DateTime.now())}.json', _tasks);
+            },
+          ),
         ],
       ),
       body: Column(
@@ -1643,42 +2419,68 @@ class _TasksTabState extends State<TasksTab> {
             padding: const EdgeInsets.all(12),
             child: TextField(
               controller: _searchController,
-              decoration: InputDecoration(hintText: 'Search tasks...', prefixIcon: const Icon(Icons.search), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)), isDense: true),
+              decoration: InputDecoration(
+                hintText: 'Search tasks...',
+                prefixIcon: const Icon(Icons.search),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                isDense: true,
+              ),
               onChanged: (v) => setState(() => _searchQuery = v),
             ),
           ),
           Expanded(
-            child: filtered.isEmpty ? const Center(child: Text('No tasks found.')) : ListView.builder(
-              itemCount: filtered.length,
-              itemBuilder: (context, index) {
-                final task = filtered[index];
-                final isDone = task['isCompleted'] == 1;
-                return CheckboxListTile(
-                  title: Text(task['title'], style: TextStyle(decoration: isDone ? TextDecoration.lineThrough : null, color: isDone ? Colors.grey : null)),
-                  value: isDone,
-                  onChanged: (bool? value) async {
-                    await DatabaseHelper.instance.updateTaskCompletion(task['id'], value == true ? 1 : 0);
-                    await _refreshTasks();
-                  },
-                  secondary: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      IconButton(icon: const Icon(Icons.edit, color: Colors.blue, size: 20), onPressed: () => _showTaskDialog(id: task['id'], initialTitle: task['title'])),
-                      IconButton(icon: const Icon(Icons.delete, color: Colors.red, size: 20), onPressed: () async { await DatabaseHelper.instance.deleteTask(task['id']); await _refreshTasks(); }),
-                    ],
+            child: filtered.isEmpty
+                ? const Center(child: Text('No tasks found.'))
+                : ListView.builder(
+                    padding: const EdgeInsets.only(bottom: 96),
+                    itemCount: filtered.length,
+                    itemBuilder: (context, index) {
+                      final task = filtered[index];
+                      final isDone = task['isCompleted'] == 1;
+                      return CheckboxListTile(
+                        title: Text(
+                          task['title'],
+                          style: TextStyle(
+                            decoration: isDone ? TextDecoration.lineThrough : null,
+                            color: isDone ? Colors.grey : null,
+                          ),
+                        ),
+                        value: isDone,
+                        onChanged: (bool? value) async {
+                          await DatabaseHelper.instance.updateTaskCompletion(task['id'], value == true ? 1 : 0);
+                          await _refreshTasks();
+                        },
+                        secondary: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.edit, color: Colors.blue, size: 20),
+                              onPressed: () => _showTaskDialog(id: task['id'], initialTitle: task['title']),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.delete, color: Colors.red, size: 20),
+                              onPressed: () async {
+                                await DatabaseHelper.instance.deleteTask(task['id']);
+                                await _refreshTasks();
+                              },
+                            ),
+                          ],
+                        ),
+                      );
+                    },
                   ),
-                );
-              },
-            ),
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton(onPressed: () => _showTaskDialog(), child: const Icon(Icons.add)),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => _showTaskDialog(),
+        child: const Icon(Icons.add),
+      ),
     );
   }
 }
 
-// ==================== 4. FINANCE TAB ====================
+// ==================== 4. FINANCE TAB (Charts + Search + Filter + Export) ====================
 class FinanceTab extends StatefulWidget {
   const FinanceTab({super.key});
 
@@ -1734,7 +2536,9 @@ class _FinanceTabState extends State<FinanceTab> {
         try {
           final d = DateTime.parse(t['date'] as String);
           return !d.isBefore(_startDate!);
-        } catch (_) { return true; }
+        } catch (_) {
+          return true;
+        }
       }).toList();
     }
     if (_endDate != null) {
@@ -1742,14 +2546,22 @@ class _FinanceTabState extends State<FinanceTab> {
         try {
           final d = DateTime.parse(t['date'] as String);
           return !d.isAfter(_endDate!);
-        } catch (_) { return true; }
+        } catch (_) {
+          return true;
+        }
       }).toList();
     }
-    setState(() { _filteredTransactions = result; });
+    setState(() {
+      _filteredTransactions = result;
+    });
   }
 
-  double get _totalIncome => _filteredTransactions.where((t) => t['type'] == 'Income').fold(0.0, (sum, t) => sum + (t['amount'] as num).toDouble());
-  double get _totalExpense => _filteredTransactions.where((t) => t['type'] == 'Expense').fold(0.0, (sum, t) => sum + (t['amount'] as num).toDouble());
+  double get _totalIncome {
+    return _filteredTransactions.where((t) => t['type'] == 'Income').fold(0.0, (sum, t) => sum + (t['amount'] as num).toDouble());
+  }
+  double get _totalExpense {
+    return _filteredTransactions.where((t) => t['type'] == 'Expense').fold(0.0, (sum, t) => sum + (t['amount'] as num).toDouble());
+  }
   double get _netBalance => _totalIncome - _totalExpense;
 
   Map<String, double> get _expenseByCategory {
@@ -1771,6 +2583,7 @@ class _FinanceTabState extends State<FinanceTab> {
         map[key] = (map[key] ?? 0) + amount;
       } catch (_) {}
     }
+    // Sort by key
     final sortedKeys = map.keys.toList()..sort();
     return {for (var k in sortedKeys) k: map[k]!};
   }
@@ -1784,7 +2597,8 @@ class _FinanceTabState extends State<FinanceTab> {
             return AlertDialog(
               title: const Text('Manage Categories'),
               content: SizedBox(
-                width: double.maxFinite, height: 400,
+                width: double.maxFinite,
+                height: 400,
                 child: DefaultTabController(
                   length: 2,
                   child: Column(
@@ -1802,7 +2616,9 @@ class _FinanceTabState extends State<FinanceTab> {
                   ),
                 ),
               ),
-              actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close'))],
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
+              ],
             );
           },
         );
@@ -1947,13 +2763,25 @@ class _FinanceTabState extends State<FinanceTab> {
                     DropdownButtonFormField<String>(
                       value: currentCats.any((c) => c['name'] == selectedCategory) ? selectedCategory : (currentCats.isNotEmpty ? currentCats.first['name'] : null),
                       decoration: const InputDecoration(labelText: 'Category'),
-                      items: currentCats.map((cat) => DropdownMenuItem<String>(value: cat['name'].toString(), child: Text(cat['name'].toString()))).toList(),
+                      items: currentCats.map((cat) {
+                        return DropdownMenuItem<String>(value: cat['name'].toString(), child: Text(cat['name'].toString()));
+                      }).toList(),
                       onChanged: (val) {
-                        if (val != null) { setDialogState(() => selectedCategory = val); }
+                        if (val != null) {
+                          setDialogState(() {
+                            selectedCategory = val;
+                          });
+                        }
                       },
                     ),
                     const SizedBox(height: 12),
-                    TextField(controller: TextEditingController(text: selectedDate), decoration: const InputDecoration(labelText: 'Date (YYYY-MM-DD)'), onChanged: (val) { selectedDate = val; }),
+                    TextField(
+                      controller: TextEditingController(text: selectedDate),
+                      decoration: const InputDecoration(labelText: 'Date (YYYY-MM-DD)'),
+                      onChanged: (val) {
+                        selectedDate = val;
+                      },
+                    ),
                   ],
                 ),
               ),
@@ -1993,7 +2821,10 @@ class _FinanceTabState extends State<FinanceTab> {
       initialDateRange: _startDate != null && _endDate != null ? DateTimeRange(start: _startDate!, end: _endDate!) : null,
     );
     if (picked != null) {
-      setState(() { _startDate = picked.start; _endDate = picked.end; });
+      setState(() {
+        _startDate = picked.start;
+        _endDate = picked.end;
+      });
       _applyFilters();
     }
   }
@@ -2012,7 +2843,12 @@ class _FinanceTabState extends State<FinanceTab> {
               if (v == 'csv') ExportService.exportTransactionsCsv(_filteredTransactions);
               if (v == 'json') ExportService.exportJson('transactions_${DateFormat('yyyy-MM-dd').format(DateTime.now())}.json', _filteredTransactions);
               if (v == 'clear_filter') {
-                setState(() { _startDate = null; _endDate = null; _searchQuery = ''; _searchController.clear(); });
+                setState(() {
+                  _startDate = null;
+                  _endDate = null;
+                  _searchQuery = '';
+                  _searchController.clear();
+                });
                 _applyFilters();
               }
             },
@@ -2030,8 +2866,16 @@ class _FinanceTabState extends State<FinanceTab> {
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: TextField(
               controller: _searchController,
-              decoration: InputDecoration(hintText: 'Search transactions by title or category...', prefixIcon: const Icon(Icons.search), isDense: true, border: OutlineInputBorder(borderRadius: BorderRadius.circular(10))),
-              onChanged: (v) { _searchQuery = v; _applyFilters(); },
+              decoration: InputDecoration(
+                hintText: 'Search transactions by title or category...',
+                prefixIcon: const Icon(Icons.search),
+                isDense: true,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+              onChanged: (v) {
+                _searchQuery = v;
+                _applyFilters();
+              },
             ),
           ),
           if (_startDate != null || _endDate != null)
@@ -2040,7 +2884,13 @@ class _FinanceTabState extends State<FinanceTab> {
               child: Chip(
                 label: Text('Filter: ${_startDate != null ? DateFormat('yyyy-MM-dd').format(_startDate!) : '...'} to ${_endDate != null ? DateFormat('yyyy-MM-dd').format(_endDate!) : '...'}'),
                 deleteIcon: const Icon(Icons.clear, size: 18),
-                onDeleted: () { setState(() { _startDate = null; _endDate = null; }); _applyFilters(); },
+                onDeleted: () {
+                  setState(() {
+                    _startDate = null;
+                    _endDate = null;
+                  });
+                  _applyFilters();
+                },
               ),
             ),
           Card(
@@ -2079,26 +2929,29 @@ class _FinanceTabState extends State<FinanceTab> {
             const Divider(),
           ],
           Expanded(
-            child: _filteredTransactions.isEmpty ? const Center(child: Text('No transactions found.')) : ListView.builder(
-              itemCount: _filteredTransactions.length,
-              itemBuilder: (context, index) {
-                final tx = _filteredTransactions[index];
-                final isIncome = tx['type'] == 'Income';
-                return ListTile(
-                  leading: CircleAvatar(backgroundColor: isIncome ? Colors.green.shade100 : Colors.red.shade100, child: Icon(isIncome ? Icons.arrow_upward : Icons.arrow_downward, color: isIncome ? Colors.green : Colors.red)),
-                  title: Text(tx['title'], style: const TextStyle(fontWeight: FontWeight.bold)),
-                  subtitle: Text('${tx['category']} • ${tx['date']}'),
-                  trailing: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text("${isIncome ? '+' : '-'}\$${(tx['amount'] as num).toStringAsFixed(2)}", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: isIncome ? Colors.green : Colors.red)),
-                      IconButton(icon: const Icon(Icons.edit, size: 18, color: Colors.blue), onPressed: () => _showTransactionDialog(transaction: tx)),
-                      IconButton(icon: const Icon(Icons.delete, size: 18, color: Colors.red), onPressed: () async { await DatabaseHelper.instance.deleteTransaction(tx['id']); await _refreshFinanceData(); }),
-                    ],
+            child: _filteredTransactions.isEmpty
+                ? const Center(child: Text('No transactions found.'))
+                : ListView.builder(
+                    padding: const EdgeInsets.only(bottom: 96),
+                    itemCount: _filteredTransactions.length,
+                    itemBuilder: (context, index) {
+                      final tx = _filteredTransactions[index];
+                      final isIncome = tx['type'] == 'Income';
+                      return ListTile(
+                        leading: CircleAvatar(backgroundColor: isIncome ? Colors.green.shade100 : Colors.red.shade100, child: Icon(isIncome ? Icons.arrow_upward : Icons.arrow_downward, color: isIncome ? Colors.green : Colors.red)),
+                        title: Text(tx['title'], style: const TextStyle(fontWeight: FontWeight.bold)),
+                        subtitle: Text('${tx['category']} • ${tx['date']}'),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text("${isIncome ? '+' : '-'}\$${(tx['amount'] as num).toStringAsFixed(2)}", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: isIncome ? Colors.green : Colors.red)),
+                            IconButton(icon: const Icon(Icons.edit, size: 18, color: Colors.blue), onPressed: () => _showTransactionDialog(transaction: tx)),
+                            IconButton(icon: const Icon(Icons.delete, size: 18, color: Colors.red), onPressed: () async { await DatabaseHelper.instance.deleteTransaction(tx['id']); await _refreshFinanceData(); }),
+                          ],
+                        ),
+                      );
+                    },
                   ),
-                );
-              },
-            ),
           ),
         ],
       ),
@@ -2167,7 +3020,9 @@ class _FinanceTabState extends State<FinanceTab> {
   }
 }
 
-// ==================== WIDGETS — Analytics, Heatmap, Weekly Review, P2P, AI ====================
+// ==================== 5. JOURNAL & WRITING STUDIO TAB (with Search + Export) ====================
+
+// ==================== PUSH 4 WIDGETS — Analytics, Heatmap, Weekly Review, P2P, AI ====================
 class CrossModuleAnalyticsWidget extends StatefulWidget {
   final double weeklyNet;
   final int weeklyWords;
@@ -2200,7 +3055,8 @@ class _CrossModuleAnalyticsWidgetState extends State<CrossModuleAnalyticsWidget>
         wSpots.add(FlSpot((6-i).toDouble(), (words/100).clamp(0,10).toDouble()));
         fSpots.add(FlSpot((6-i).toDouble(), (net/50).clamp(-5,5).toDouble()));
       }
-      setState(()=>{ _habitSpots=hSpots, _writingSpots=wSpots, _financeSpots=fSpots });
+      if(!mounted) return;
+      setState((){ _habitSpots=hSpots; _writingSpots=wSpots; _financeSpots=fSpots; });
     } catch(_){}
   }
   @override
@@ -2273,7 +3129,8 @@ class _HabitHeatmapWidgetState extends State<HabitHeatmapWidget> {
       for(var c in completions){ final d=c['completed_date'] as String; map[d]=(map[d]??0)+1; }
       int maxV = 1;
       if(map.isNotEmpty) maxV = map.values.reduce((a,b)=>a>b?a:b);
-      setState(()=>{ _heatData=map, _maxCount=maxV>0?maxV:1 });
+      if(!mounted) return;
+      setState((){ _heatData=map; _maxCount=maxV>0?maxV:1; });
     } catch(_){}
   }
   @override
@@ -2333,7 +3190,11 @@ class _WeeklyReviewCardState extends State<WeeklyReviewCard> {
         title: const Text('Weekly Life Review PDF', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
         subtitle: const Text('Last 7 days — habits, tasks, finance, writing — local PDF', style: TextStyle(fontSize: 11)),
         trailing: _generating
-            ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+            ? const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
             : ElevatedButton.icon(
                 icon: const Icon(Icons.picture_as_pdf, size: 16),
                 label: const Text('Generate'),
@@ -2341,7 +3202,15 @@ class _WeeklyReviewCardState extends State<WeeklyReviewCard> {
                   setState(()=>_generating=true);
                   await WeeklyReviewService.shareWeeklyPdf();
                   setState(()=>_generating=false);
-                  if(mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Weekly PDF generated & share sheet opened')));
+                  if(mounted){
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'Weekly PDF generated & share sheet opened',
+                        ),
+                      ),
+                    );
+                  }
                 },
               ),
       ),
@@ -2379,7 +3248,9 @@ class _P2PSyncCardState extends State<P2PSyncCard> {
               Expanded(
                 child: ElevatedButton.icon(
                   icon: Icon(_serving?Icons.stop:Icons.play_arrow),
-                  label: Text(_serving?'Stop Server':'Start Server (Host)'),
+                  label: Text(
+                    _serving?'Stop Server':'Start Server (Host)',
+                  ),
                   onPressed: () async {
                     if(_serving){
                       await P2PSyncService.stopServer();
@@ -2387,7 +3258,15 @@ class _P2PSyncCardState extends State<P2PSyncCard> {
                     } else {
                       final ok = await P2PSyncService.startServer();
                       setState(()=>_serving=ok);
-                      if(ok&&mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('P2P Server at http://$_ip:8765/db')));
+                      if(ok&&mounted){
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              'P2P Server at http://$_ip:8765/db',
+                            ),
+                          ),
+                        );
+                      }
                     }
                   },
                 ),
@@ -2406,20 +3285,44 @@ class _P2PSyncCardState extends State<P2PSyncCard> {
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children:[
-          const Text('Enter Windows host IP (e.g., 192.168.1.15) — both devices same Wi-Fi, host must have Started Server', style: TextStyle(fontSize: 11)),
+          const Text(
+            'Enter Windows host IP (e.g., 192.168.1.15) — '
+            'both devices same Wi-Fi, host must have Started Server',
+            style: TextStyle(fontSize: 11),
+          ),
           const SizedBox(height:12),
-          TextField(controller: _ipController, decoration: const InputDecoration(labelText: 'Host IP', hintText: '192.168.1.15', border: OutlineInputBorder())),
+          TextField(
+            controller: _ipController,
+            decoration: const InputDecoration(
+              labelText: 'Host IP',
+              hintText: '192.168.1.15',
+              border: OutlineInputBorder(),
+            ),
+          ),
         ],
       ),
       actions:[
-        TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text('Cancel')),
+        TextButton(
+          onPressed: ()=>Navigator.pop(ctx),
+          child: const Text('Cancel'),
+        ),
         ElevatedButton(
           onPressed: () async {
             final ip=_ipController.text.trim();
             if(ip.isNotEmpty){
               Navigator.pop(ctx);
               final ok = await P2PSyncService.syncFromServer(ip);
-              if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(ok?'Sync success! Restart app. Backup saved.':'Sync failed — check IP & host server')));
+              if(mounted){
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      ok
+                          ?'Sync success! Restart app. Backup saved.'
+                          :'Sync failed — check IP & host server',
+                    ),
+                  ),
+                );
+              }
             }
           },
           child: const Text('Pull DB'),
@@ -2429,42 +3332,30 @@ class _P2PSyncCardState extends State<P2PSyncCard> {
   }
 }
 
-class AiCopilotStatusCard extends StatefulWidget {
-  const AiCopilotStatusCard({super.key});
-  @override
-  State<AiCopilotStatusCard> createState() => _AiCopilotStatusCardState();
-}
-class _AiCopilotStatusCardState extends State<AiCopilotStatusCard> {
-  bool? _online;
-  String _url = AiCopilotService.baseUrl;
-  @override
-  void initState(){ super.initState(); _check(); }
-  Future<void> _check() async { final ok = await AiCopilotService.checkConnection(); setState(()=>_online=ok); }
+class AeroStatusCard extends StatelessWidget {
+  final VoidCallback? onOpen;
+  const AeroStatusCard({super.key, this.onOpen});
   @override
   Widget build(BuildContext context){
-    return Card(
-      elevation: 2,
-      color: Colors.purple.shade50,
-      child: ListTile(
-        leading: Icon(Icons.smart_toy_outlined, color: _online==true?Colors.green:Colors.grey),
-        title: const Text('Local AERO — Ollama', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
-        subtitle: Text('Endpoint: $_url — Status: ${_online==null?'Checking...':_online!?'Online ✓':'Offline — run ollama run llama3'}', style: const TextStyle(fontSize: 10)),
-        trailing: IconButton(icon: const Icon(Icons.settings, size:18), onPressed: ()=>_showSettings()),
+    final r = AeroRouter.instance;
+    return ListenableBuilder(
+      listenable: r,
+      builder: (context, _) => Card(
+        elevation: 2,
+        color: Colors.purple.shade50,
+        child: ListTile(
+          onTap: onOpen,
+          leading: Icon(r.primary.icon, color: r.primary == AeroEngine.core ? Colors.blueGrey : Colors.green),
+          title: const Text('AERO', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+          subtitle: Text(r.detecting ? 'Detecting engines…' : '${r.engineLabel} — tap to chat', style: const TextStyle(fontSize: 10)),
+          trailing: IconButton(icon: const Icon(Icons.refresh, size: 18), tooltip: 'Re-detect', onPressed: () => r.detect(force: true)),
+        ),
       ),
     );
   }
-  void _showSettings(){
-    final urlCtrl = TextEditingController(text: AiCopilotService.baseUrl);
-    final modelCtrl = TextEditingController(text: AiCopilotService.model);
-    showDialog(context: context, builder: (ctx)=>AlertDialog(
-      title: const Text('AERO Settings'),
-      content: Column(mainAxisSize: MainAxisSize.min, children:[TextField(controller: urlCtrl, decoration: const InputDecoration(labelText: 'Ollama URL', hintText: 'http://localhost:11434')), const SizedBox(height:8), TextField(controller: modelCtrl, decoration: const InputDecoration(labelText: 'Model', hintText: 'llama3'))]),
-      actions:[TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text('Cancel')), ElevatedButton(onPressed: (){ AiCopilotService.setCustomEndpoint(urlCtrl.text.trim(), modelCtrl.text.trim()); setState(()=>_url=urlCtrl.text.trim()); Navigator.pop(ctx); _check(); }, child: const Text('Save'))],
-    ));
-  }
 }
 
-// ==================== 5. WRITING HUB & MICRO-JOURNAL ====================
+// ==================== 5. WRITING HUB — PUSH 4 KANBAN + AI COPILOT ====================
 class JournalTab extends StatefulWidget {
   const JournalTab({super.key});
   @override
@@ -2505,12 +3396,18 @@ class _JournalTabState extends State<JournalTab> {
   }
 
   Future<void> _updateStatus(int id, String newStatus) async {
-    await DatabaseHelper.instance.updateJournalEntry(id, {'status': newStatus});
+    // Land at the bottom of the target column so ordering stays stable after restart.
+    final inTarget = _entries.where((e)=>(e['status']??'Idea')==newStatus).map((e)=>(e['order_index'] as int?) ?? 0);
+    final nextOrder = inTarget.isEmpty ? 0 : inTarget.reduce((a,b)=>a>b?a:b) + 1;
+    await DatabaseHelper.instance.updateJournalEntry(id, {'status': newStatus, 'order_index': nextOrder});
     await _refreshEntries();
   }
 
-  Future<void> _updateOrder(int id, int newOrder) async {
-    await DatabaseHelper.instance.updateJournalEntry(id, {'order_index': newOrder});
+  /// Renumber a whole column 0..n so order_index never collides and survives restarts.
+  Future<void> _persistColumnOrder(List<Map<String, dynamic>> column) async {
+    for(int i=0; i<column.length; i++){
+      await DatabaseHelper.instance.updateJournalEntry(column[i]['id'] as int, {'order_index': i});
+    }
   }
 
   void _openEditor({Map<String, dynamic>? entry}){
@@ -2520,6 +3417,7 @@ class _JournalTabState extends State<JournalTab> {
     String selectedCategory = entry?['category'] ?? _writingCategories.first;
     String selectedMood = entry?['mood'] ?? _moods.first;
     String selectedStatus = entry?['status'] ?? 'Idea';
+    bool isAiLoading = false;
     String aiResult = '';
 
     showDialog(
@@ -2532,11 +3430,12 @@ class _JournalTabState extends State<JournalTab> {
                 Text(isEditing?'Edit Writing':'New Writing'),
                 Row(children:[
                   IconButton(icon: const Icon(Icons.smart_toy_outlined, size:20), tooltip: 'AERO', onPressed: ()=>_showAiDialog(contentController, setDialogState)),
-                  IconButton(icon: const Icon(Icons.close, size:20), onPressed: ()=>Navigator.pop(context)),
+                  IconButton(icon: const Icon(Icons.category, size:20), onPressed: ()=>Navigator.pop(context)),
                 ]),
               ]),
               content: SizedBox(
-                width: 600, height: 520,
+                width: 600,
+                height: 520,
                 child: Column(
                   children: [
                     Row(children:[
@@ -2554,18 +3453,43 @@ class _JournalTabState extends State<JournalTab> {
                       const SizedBox(height:8),
                       Container(
                         padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(color: Colors.purple.shade50, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.purple.shade200)),
+                        decoration: BoxDecoration(
+                          color: Colors.purple.shade50,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: Colors.purple.shade200,
+                          ),
+                        ),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children:[
                             Row(children:[
                               const Icon(Icons.smart_toy, size:14),
                               const SizedBox(width:4),
-                              const Text('AI Suggestion', style: TextStyle(fontWeight: FontWeight.bold, fontSize:11)),
+                              const Text(
+                                'AI Suggestion',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize:11,
+                                ),
+                              ),
                               const Spacer(),
-                              TextButton(onPressed: (){ contentController.text += '\n\n' + aiResult; setDialogState(()=>aiResult=''); }, child: const Text('Insert', style: TextStyle(fontSize:10))),
+                              TextButton(
+                                onPressed: (){
+                                  contentController.text +=
+                                      '\n\n' + aiResult;
+                                  setDialogState(()=>aiResult='');
+                                },
+                                child: const Text(
+                                  'Insert',
+                                  style: TextStyle(fontSize:10),
+                                ),
+                              ),
                             ]),
-                            Text(aiResult, style: const TextStyle(fontSize:11)),
+                            Text(
+                              aiResult,
+                              style: const TextStyle(fontSize:11),
+                            ),
                           ],
                         ),
                       ),
@@ -2580,7 +3504,7 @@ class _JournalTabState extends State<JournalTab> {
                   final content = contentController.text.trim();
                   if(title.isNotEmpty && content.isNotEmpty){
                     final wordCount = content.split(RegExp(r'\s+')).length;
-                    final row = {'title': title, 'content': content, 'category': selectedCategory, 'mood': selectedMood, 'status': selectedStatus, 'date': DateFormat('yyyy-MM-dd').format(DateTime.now()), 'color': '#9B59B6', 'word_count': wordCount, 'order_index': _entries.length};
+                    final row = {'title': title, 'content': content, 'category': selectedCategory, 'mood': selectedMood, 'status': selectedStatus, 'date': isEditing ? (entry?['date'] ?? DateFormat('yyyy-MM-dd').format(DateTime.now())) : DateFormat('yyyy-MM-dd').format(DateTime.now()), 'color': entry?['color'] ?? '#9B59B6', 'word_count': wordCount, 'order_index': isEditing && entry?['status'] == selectedStatus ? (entry?['order_index'] ?? 0) : _entries.where((e)=>(e['status']??'Idea')==selectedStatus).length};
                     if(isEditing){ await DatabaseHelper.instance.updateJournalEntry(entry['id'], row); } else { await DatabaseHelper.instance.insertJournalEntry(row); }
                     await _refreshEntries();
                     if(mounted) Navigator.pop(context);
@@ -2595,41 +3519,28 @@ class _JournalTabState extends State<JournalTab> {
   }
 
   void _showAiDialog(TextEditingController contentCtrl, StateSetter parentSetState){
-    final instructionCtrl = TextEditingController(text: 'Improve this writing, keep voice');
+    final instructionCtrl = TextEditingController(text: 'Improve this writing, keep my voice, fix grammar');
     String aiResponse = '';
+    AeroEngine? usedEngine;
     bool loading = false;
     showDialog(context: context, builder: (ctx)=>StatefulBuilder(builder: (ctx, setState){
+      Future<void> run(String instruction) async {
+        if(contentCtrl.text.trim().isEmpty || loading) return;
+        setState(()=>loading=true);
+        final reply = await AeroRouter.instance.assistWriting(instruction, contentCtrl.text);
+        if(!ctx.mounted) return;
+        setState((){ aiResponse=reply.text; usedEngine=reply.engine; loading=false; });
+      }
       return AlertDialog(
-        title: const Text('Local AERO — Ollama'),
+        title: Text('AERO — ${AeroRouter.instance.primary.shortName}'),
         content: SizedBox(width: 400, height: 380, child: Column(children:[
           TextField(controller: instructionCtrl, decoration: const InputDecoration(labelText: 'Instruction', hintText: 'Improve, Summarize, Expand, Critique...')),
           const SizedBox(height:12),
-          Row(children:[
-            ElevatedButton(
-              onPressed: () async {
-                setState(()=>loading=true);
-                final res = await AiCopilotService.improveText(contentCtrl.text, instruction: instructionCtrl.text);
-                setState((){ aiResponse=res; loading=false; });
-              },
-              child: const Text('Run AI'),
-            ),
-            const SizedBox(width:8),
-            TextButton(
-              onPressed: () async {
-                setState(()=>loading=true);
-                final res = await AiCopilotService.summarize(contentCtrl.text);
-                setState((){ aiResponse=res; loading=false; });
-              },
-              child: const Text('Summarize'),
-            ),
-            TextButton(
-              onPressed: () async {
-                setState(()=>loading=true);
-                final res = await AiCopilotService.expand(contentCtrl.text);
-                setState((){ aiResponse=res; loading=false; });
-              },
-              child: const Text('Expand'),
-            ),
+          Wrap(spacing: 8, runSpacing: 4, children:[
+            ElevatedButton(onPressed: () => run(instructionCtrl.text), child: const Text('Run AI')),
+            TextButton(onPressed: () => run('Summarize this in 3 bullet points, keep key ideas'), child: const Text('Summarize')),
+            TextButton(onPressed: () => run('Expand this with vivid detail, keep the same style'), child: const Text('Expand')),
+            TextButton(onPressed: () => run('Critique this as an editor: strengths, weaknesses, 3 specific improvements'), child: const Text('Critique')),
           ]),
           const SizedBox(height:12),
           if(loading) const CircularProgressIndicator(),
@@ -2637,34 +3548,72 @@ class _JournalTabState extends State<JournalTab> {
         ])),
         actions:[
           TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text('Close')),
-          if(aiResponse.isNotEmpty) ElevatedButton(onPressed: (){ contentCtrl.text = aiResponse; Navigator.pop(ctx); parentSetState((){}); }, child: const Text('Replace Content')),
-          if(aiResponse.isNotEmpty) ElevatedButton(onPressed: (){ contentCtrl.text += '\n\n' + aiResponse; Navigator.pop(ctx); parentSetState((){}); }, child: const Text('Append')),
+          if(aiResponse.isNotEmpty && usedEngine != AeroEngine.core) ElevatedButton(onPressed: (){ contentCtrl.text = aiResponse; Navigator.pop(ctx); parentSetState((){}); }, child: const Text('Replace Content')),
+          if(aiResponse.isNotEmpty && usedEngine != AeroEngine.core) ElevatedButton(onPressed: (){ contentCtrl.text += '\n\n$aiResponse'; Navigator.pop(ctx); parentSetState((){}); }, child: const Text('Append')),
         ],
       );
     }));
   }
 
   Widget _buildKanbanView(){
-    final columns = _statuses;
-    return Row(
-      children: columns.map((status){
+    // Phones: fixed-width columns you swipe between (4 columns in 390pt squeezed text to one letter per line).
+    // Wide screens (Surface, iPad landscape): all four side by side.
+    return LayoutBuilder(builder: (ctx, constraints){
+      final wide = constraints.maxWidth >= 900;
+      final columns = _statuses.map((status){
+        final col = _buildKanbanColumn(status);
+        return wide ? Expanded(child: col) : SizedBox(width: (constraints.maxWidth * 0.78).clamp(240.0, 320.0).toDouble(), child: col);
+      }).toList();
+      if(wide) return Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: columns);
+      return SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.only(right: 8),
+        child: SizedBox(height: constraints.maxHeight, child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: columns)),
+      );
+    });
+  }
+
+  Widget _buildKanbanColumn(String status){
         final statusEntries = _filteredEntries.where((e)=>(e['status']??'Idea')==status).toList();
         final statusEnum = WritingStatusExt.fromString(status);
-        return Expanded(
-          child: Container(
+        final headerText = statusEnum.color.computeLuminance() > 0.6 ? Colors.black87 : Colors.white;
+        return Container(
             margin: const EdgeInsets.all(4),
             decoration: BoxDecoration(color: statusEnum.color.withOpacity(0.2), borderRadius: BorderRadius.circular(12), border: Border.all(color: statusEnum.color)),
             child: Column(
               children: [
                 Container(
                   padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(color: statusEnum.color, borderRadius: const BorderRadius.only(topLeft: Radius.circular(11), topRight: Radius.circular(11))),
+                  decoration: BoxDecoration(
+                    color: statusEnum.color,
+                    borderRadius: const BorderRadius.only(
+                      topLeft: Radius.circular(11),
+                      topRight: Radius.circular(11),
+                    ),
+                  ),
                   child: Row(children:[
-                    Icon(statusEnum.icon, size:16, color: Colors.white),
+                    Icon(
+                      statusEnum.icon,
+                      size:16,
+                      color: headerText,
+                    ),
                     const SizedBox(width:4),
-                    Text(status, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 12)),
+                    Text(
+                      status,
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: headerText,
+                        fontSize: 12,
+                      ),
+                    ),
                     const Spacer(),
-                    Text('${statusEntries.length}', style: const TextStyle(color: Colors.white, fontSize: 11)),
+                    Text(
+                      '${statusEntries.length}',
+                      style: TextStyle(
+                        color: headerText,
+                        fontSize: 11,
+                      ),
+                    ),
                   ]),
                 ),
                 Expanded(
@@ -2672,8 +3621,10 @@ class _JournalTabState extends State<JournalTab> {
                     itemCount: statusEntries.length,
                     onReorder: (oldIdx, newIdx) async {
                       if(newIdx>oldIdx) newIdx--;
-                      final moved = statusEntries[oldIdx];
-                      await _updateOrder(moved['id'], newIdx);
+                      final column = List<Map<String,dynamic>>.from(statusEntries);
+                      final moved = column.removeAt(oldIdx);
+                      column.insert(newIdx, moved);
+                      await _persistColumnOrder(column);
                       await _refreshEntries();
                     },
                     itemBuilder: (ctx, idx){
@@ -2684,13 +3635,27 @@ class _JournalTabState extends State<JournalTab> {
                         subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[Text('${entry['category']} • ${entry['word_count']??0}w', style: const TextStyle(fontSize: 10)), const SizedBox(height:4), LinearProgressIndicator(value: _statuses.indexOf(status)/3, color: statusEnum.color, backgroundColor: Colors.grey.shade200, minHeight: 3)]),
                         trailing: PopupMenuButton<String>(
                           onSelected: (v){
-                            if(v=='edit'){ _openEditor(entry: entry); } else if(v!=''&&_statuses.contains(v)){ _updateStatus(entry['id'], v); }
+                            if(v=='edit'){
+                              _openEditor(entry: entry);
+                            } else if(v!=''&&_statuses.contains(v)){
+                              _updateStatus(entry['id'], v);
+                            }
                           },
                           itemBuilder: (c){
                             return [
-                              const PopupMenuItem(value: 'edit', child: Text('Edit')),
+                              const PopupMenuItem(
+                                value: 'edit',
+                                child: Text('Edit'),
+                              ),
                               const PopupMenuDivider(),
-                              ..._statuses.where((s)=>s!=status).map((s)=>PopupMenuItem(value:s, child: Text('Move to $s'))),
+                              ..._statuses.where(
+                                (s)=>s!=status
+                              ).map(
+                                (s)=>PopupMenuItem(
+                                  value:s,
+                                  child: Text('Move to $s'),
+                                ),
+                              ),
                             ];
                           },
                         ),
@@ -2701,10 +3666,7 @@ class _JournalTabState extends State<JournalTab> {
                 ),
               ],
             ),
-          ),
         );
-      }).toList(),
-    );
   }
 
   @override
@@ -2735,16 +3697,26 @@ class _JournalTabState extends State<JournalTab> {
               return Padding(
                 padding: const EdgeInsets.only(right:8),
                 child: ChoiceChip(
-                  label: Row(mainAxisSize: MainAxisSize.min, children:[Icon(enumVal.icon, size:14), const SizedBox(width:4), Text(st)]),
+                  label: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children:[
+                      Icon(enumVal.icon, size:14),
+                      const SizedBox(width:4),
+                      Text(st),
+                    ],
+                  ),
                   selected: _selectedStatusFilter==st,
-                  onSelected: (s){ setState(()=>_selectedStatusFilter=st); _applyFilters(); },
+                  onSelected: (s){
+                    setState(()=>_selectedStatusFilter=st);
+                    _applyFilters();
+                  },
                   selectedColor: enumVal.color.withOpacity(0.3),
                 ),
               );
             }),
           ])),
           const Divider(height:1),
-          Expanded(child: _isKanbanView ? _buildKanbanView() : _filteredEntries.isEmpty ? const Center(child: Text('No writings found. Tap + to start. Switch to Kanban via top icon.')) : ListView.builder(itemCount: _filteredEntries.length, itemBuilder: (ctx, idx){
+          Expanded(child: _isKanbanView ? _buildKanbanView() : _filteredEntries.isEmpty ? const Center(child: Text('No writings found. Tap + to start. Switch to Kanban via top icon.')) : ListView.builder(padding: const EdgeInsets.only(bottom: 96), itemCount: _filteredEntries.length, itemBuilder: (ctx, idx){
             final entry = _filteredEntries[idx];
             final status = entry['status']??'Idea';
             final statusEnum = WritingStatusExt.fromString(status);
@@ -2755,11 +3727,9 @@ class _JournalTabState extends State<JournalTab> {
                 const SizedBox(height:4),
                 Text(entry['content'], maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(color: Colors.grey.shade700, fontSize: 12)),
                 const SizedBox(height:6),
-                Row(children:[
+                Wrap(spacing: 6, runSpacing: 2, crossAxisAlignment: WrapCrossAlignment.center, children:[
                   Chip(label: Text(entry['category'], style: const TextStyle(fontSize: 10)), visualDensity: VisualDensity.compact, padding: EdgeInsets.zero),
-                  const SizedBox(width:6),
                   Chip(label: Text(status, style: const TextStyle(fontSize: 10)), backgroundColor: statusEnum.color.withOpacity(0.3), visualDensity: VisualDensity.compact, avatar: Icon(statusEnum.icon, size:12)),
-                  const SizedBox(width:6),
                   Text('${entry['mood']} • ${entry['date']} • ${entry['word_count']??0}w', style: const TextStyle(fontSize: 10, color: Colors.grey)),
                 ]),
               ]),
@@ -2778,7 +3748,9 @@ class _JournalTabState extends State<JournalTab> {
   }
 }
 
-// ==================== GALLERY TAB ====================
+
+
+// ==================== PUSH 5 — GALLERY (Take Pictures + Save in App + Phone Gallery) ====================
 class GalleryTab extends StatefulWidget {
   const GalleryTab({super.key});
   @override
@@ -2836,7 +3808,7 @@ class _GalleryTabState extends State<GalleryTab> {
   }
 }
 
-// ==================== GAMETAB ====================
+// ==================== PUSH 5 — GAMETAB — Flappy, Breakout, Space Shooter ONLY (No Snake) ====================
 class GameTab extends StatefulWidget {
   const GameTab({super.key});
   @override State<GameTab> createState() => _GameTabState();
@@ -2866,7 +3838,9 @@ class _GameTabState extends State<GameTab> {
   }
 }
 
-// ==================== AI CHAT TAB ====================
+
+
+// ==================== AERO TAB — iPhone first, auto engine, streaming, no nag banners ====================
 class AiChatTab extends StatefulWidget {
   const AiChatTab({super.key});
   @override
@@ -2874,335 +3848,405 @@ class AiChatTab extends StatefulWidget {
 }
 
 class _AiChatTabState extends State<AiChatTab> {
+  final AeroRouter _router = AeroRouter.instance;
   final SpeechToText _speech = SpeechToText();
-  bool _listening = false;
-  final List<Map<String,String>> _messages = [];
   final TextEditingController _inputCtrl = TextEditingController();
-  bool _isLoading = false;
-  bool? _online;
-  bool _bannerDismissed = false;
   final ScrollController _scrollCtrl = ScrollController();
+  bool _listening = false;
+  int _lastCount = 0;
+  String _lastTail = '';
+
+  bool get _voiceSupported => Platform.isIOS || Platform.isAndroid || Platform.isMacOS;
 
   @override
-  void initState(){
+  void initState() {
     super.initState();
-    _checkOnline();
-    _messages.add({
-      'role': 'assistant',
-      'text': 'Hi Caleb — I\'m your local Onyx Beacon AERO (Ollama). '
-      'Zero cloud, zero fees. Ask me to improve writing, summarize your week, '
-      'analyze habits, or brainstorm.\n\n'
-      'Try: \"Summarize my last 7 days\" or \"Help me expand chapter 2\"'
-    });
+    _router.addListener(_onRouterChanged);
+    _router.detect();
   }
 
-  Future<void> _checkOnline() async {
-    final ok = await AiCopilotService.checkConnection();
-    setState(()=>_online=ok);
+  @override
+  void dispose() {
+    _router.removeListener(_onRouterChanged);
+    _inputCtrl.dispose();
+    _scrollCtrl.dispose();
+    try { _speech.stop(); } catch (_) {}
+    super.dispose();
   }
 
-  Future<void> _showAeroSettings() async {
-    final urlCtrl = TextEditingController(text: AiCopilotService.baseUrl);
-    final modelCtrl = TextEditingController(text: AiCopilotService.model);
-    final hasModel = await AeroOnDeviceService.checkModelExists();
-    final isOnline = _online ?? false;
-    final isApple = Platform.isIOS;
-    showDialog(context: context, builder: (ctx)=>AlertDialog(
-      title: const Text('AERO Settings — Real AI + Bible'),
-      content: SingleChildScrollView(
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children:[
-          const Text('What Apple Intelligence actually is:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
-          const SizedBox(height:4),
-          const SelectableText(
-            'Think of AERO like a car brand. AERO is the name on the dashboard, the memory, the habit/writing/finance context, the SQLite brain you built. The engine that makes it talk can be swapped:',
-            style: TextStyle(fontSize:10),
-          ),
-          const SizedBox(height:8),
-          Wrap(spacing:4, runSpacing:4, children: [
-            const Chip(label: Text('Core: always', style: TextStyle(fontSize:9)), backgroundColor: Colors.black12, avatar: Icon(Icons.memory, size:12)),
-            Chip(label: Text(hasModel ? 'Engine1 TinyLlama: ready' : 'Engine1: need 600MB', style: TextStyle(fontSize:9)), backgroundColor: hasModel ? Colors.green.withOpacity(0.2) : Colors.orange.withOpacity(0.2), avatar: const Icon(Icons.phone_iphone, size:12)),
-            Chip(label: Text(isApple ? 'Engine2 Apple Intel: check' : 'Engine2 Apple: iPhone 15 Pro+', style: TextStyle(fontSize:9)), backgroundColor: Colors.pink.withOpacity(0.2), avatar: const Icon(Icons.auto_awesome, size:12)),
-            Chip(label: Text(isOnline ? 'Engine3 Ollama: online' : 'Engine3 Ollama: offline', style: TextStyle(fontSize:9)), backgroundColor: isOnline ? Colors.green.withOpacity(0.2) : Colors.grey.withOpacity(0.2), avatar: Icon(Icons.computer, size:12)),
-            Chip(label: Text('Engine4 Siri: setup', style: TextStyle(fontSize:9)), backgroundColor: Colors.amber.withOpacity(0.2), avatar: Icon(Icons.mic, size:12)),
-          ]),
-          const SizedBox(height:8),
-          ElevatedButton.icon(
-            icon: const Icon(Icons.info_outline, size:14),
-            label: const Text('View Full AERO Architecture (4 Engines)', style: TextStyle(fontSize:11)),
-            onPressed: (){ Navigator.pop(ctx); _showAeroArchitecture(); },
-          ),
-          const Divider(height:16),
-          const SelectableText(
-            'Windows: http://localhost:11434 — iPhone same Wi-Fi: http://192.168.1.15:11434 (your Windows IP). Zero cloud.',
-            style: TextStyle(fontSize:11),
-          ),
-          const SizedBox(height:12),
-          TextField(controller: urlCtrl, decoration: const InputDecoration(labelText: 'AERO URL (paste)', hintText: 'http://192.168.1.15:11434', border: OutlineInputBorder())),
-          const SizedBox(height:8),
-          TextField(controller: modelCtrl, decoration: const InputDecoration(labelText: 'Model', hintText: 'llama3', border: OutlineInputBorder())),
-        ]),
-      ),
-      actions:[
-        TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text('Cancel')),
-        ElevatedButton(onPressed: (){ AiCopilotService.setCustomEndpoint(urlCtrl.text.trim(), modelCtrl.text.trim()); Navigator.pop(ctx); _checkOnline(); }, child: const Text('Save & Test')),
-      ],
-    ));
-  }
-
-  Future<void> _showAeroArchitecture() async {
-    final hasModel = await AeroOnDeviceService.checkModelExists();
-    final isOnline = await AiCopilotService.checkConnection();
-    final isApple = await AppleIntelligenceService.checkAvailability();
-    final engines = AeroArchitectureService.getEngines(
-      hasTinyLlamaModel: hasModel,
-      isOllamaOnline: isOnline,
-      isAppleIntelligenceAvailable: isApple,
-    );
-    if(!mounted) return;
-    showDialog(context: context, builder: (ctx)=>AlertDialog(
-      title: const Text('AERO — 4 Engine Architecture'),
-      content: SingleChildScrollView(
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[
-          const Text('What Apple Intelligence actually is:', style: TextStyle(fontWeight: FontWeight.bold)),
-          const SizedBox(height:6),
-          const SelectableText(
-            'Think of AERO like a car brand. AERO is the name on the dashboard, the memory, the habit/writing/finance context, the SQLite brain you built. The engine that makes it talk can be swapped.',
-            style: TextStyle(fontSize:11),
-          ),
-          const SizedBox(height:12),
-          ...engines.map((e)=>Card(
-            color: e.color.withOpacity(0.12),
-            child: ListTile(
-              leading: Icon(e.icon, color: e.color),
-              title: Text(e.name, style: const TextStyle(fontSize:12, fontWeight: FontWeight.bold)),
-              subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[
-                Text(e.subtitle, style: TextStyle(fontSize:10, fontStyle: FontStyle.italic, color: e.color)),
-                const SizedBox(height:2),
-                Text(e.description, style: const TextStyle(fontSize:10)),
-                const SizedBox(height:4),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal:6, vertical:2),
-                  decoration: BoxDecoration(color: e.color.withOpacity(0.2), borderRadius: BorderRadius.circular(4)),
-                  child: Text(e.availability, style: const TextStyle(fontSize:9, fontWeight: FontWeight.bold)),
-                ),
-              ]),
-              isThreeLine: true,
-            ),
-          )),
-        ]),
-      ),
-      actions:[
-        TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text('Close')),
-        ElevatedButton(
-          onPressed: () async {
-            Navigator.pop(ctx);
-            if(!hasModel){
-              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Downloading 600MB TinyLlama for Engine 1...')));
-              await AeroOnDeviceService.downloadModel(onProgress: (p){ debugPrint('Download ${(p*100).toStringAsFixed(1)}%'); });
-              if(mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('TinyLlama ready! Try "hi" again.')));
-            }
-          },
-          child: Text(hasModel ? 'Engine 1 Ready' : 'Download Engine 1 (600MB)'),
-        ),
-      ],
-    ));
-  }
-
-  Future<void> _sendMessage() async {
-    final text = _inputCtrl.text.trim();
-    if(text.isEmpty || _isLoading) return;
-    setState((){
-      _messages.add({'role':'user','text':text});
-      _isLoading = true;
-      _inputCtrl.clear();
-    });
-    _scrollToBottom();
-    try {
-      final now = DateTime.now();
-      final realTimeStr = DateFormat('yyyy-MM-dd HH:mm:ss EEEE').format(now);
-      final lq = text.toLowerCase();
-      final hasOnDevice = await AeroOnDeviceService.checkModelExists();
-      final isOffline = _online == false;
-      if(hasOnDevice && (isOffline || lq == 'hi' || lq == 'hello' || lq.contains('what time'))){
-        try {
-          final od = await AeroOnDeviceService.generateOnDevice(text);
-          setState((){
-            _messages.add({'role':'assistant','text':od});
-            _isLoading = false;
-          });
-          _scrollToBottom();
-          return;
-        } catch(_){}
-      }
-
-      String contextPrompt = text;
-      final isBible = lq.contains('bible') || lq.contains('verse') || lq.contains('scripture') || lq.contains('psalm') || lq.contains('romans') || lq.contains('jesus') || lq.contains('god');
-      final isTime = lq.contains('time') || lq.contains('date') || lq.contains('today');
-      
-      if(isTime){
-        contextPrompt = 'REAL TIME: $realTimeStr Detroit EST. User asks time/date: $text. Answer with $realTimeStr exactly.';
-      } else if(isBible){
-        contextPrompt = 'REAL TIME: $realTimeStr. User BIBLE query: $text. Provide deep Bible answer with cross-refs and practical life application.';
-      }
-
-      final instruction = isBible 
-        ? 'You are Onyx Beacon AERO Bible Scholar + Life Coach. Real AI for Bible, personal projects, lifestyle. Use REAL TIME $realTimeStr.'
-        : 'You are Onyx Beacon AERO Real AI. Real time $realTimeStr Detroit. Bible, lifestyle, personal projects expert.';
-
-      String response;
-      try {
-        response = await AiCopilotService.improveText(contextPrompt, instruction: instruction).timeout(const Duration(seconds: 8), onTimeout: () => 'TIMEOUT');
-      } catch(_){
-        response = 'TIMEOUT';
-      }
-      
-      if(response == 'TIMEOUT' || response.startsWith('AI Error:') || response.startsWith('AI Offline:')){
-        if(hasOnDevice){
-          final od = await AeroOnDeviceService.generateOnDevice(text);
-          response = od + '\n\n[on-device real AI - $realTimeStr]';
-        } else {
-          response = 'AERO offline. Run ollama run llama3 on your PC or download 600MB on-device model in settings.';
-        }
-      }
-      setState((){
-        _messages.add({'role':'assistant','text':response});
-        _isLoading = false;
-      });
-    } catch(e){
-      setState((){
-        _messages.add({'role':'assistant','text':'Error: $e'});
-        _isLoading = false;
-      });
+  void _onRouterChanged() {
+    final msgs = _router.messages;
+    final tail = msgs.isEmpty ? '' : msgs.last.text;
+    if (msgs.length != _lastCount || tail.length != _lastTail.length) {
+      _lastCount = msgs.length;
+      _lastTail = tail;
+      _scrollToBottom();
     }
-    _scrollToBottom();
+  }
+
+  String get _welcome =>
+      'Hi Caleb — AERO here, iPhone-first. Right now I\'m using ${_router.engineLabel}.\n'
+      'I pick automatically: Core (instant) → TinyLlama (offline, ~640 MB) → Apple Intelligence (15 Pro+, iOS 26) → Ollama (Surface).\n'
+      'Instant without any model: "hi", "what time is it", "summarize my week", "habits left today", "my tasks".';
+
+  Future<void> _send() async {
+    final text = _inputCtrl.text.trim();
+    if (text.isEmpty || _router.busy) return;
+    if (_listening) _stopListening();
+    _inputCtrl.clear();
+    await _router.send(text);
+  }
+
+  Future<void> _startDownload() async {
+    final ok = await AeroOnDeviceService.downloadModel();
+    await _router.detect(force: true);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(ok
+          ? 'Offline model ready (${_router.modelSizeMB} MB) — AERO now answers with VPN on, no Surface needed.'
+          : 'Download did not finish — check Wi-Fi and keep the app open, then tap Download again.'),
+    ));
+  }
+
+  void _showAeroSettings() {
+    final urlCtrl = TextEditingController(text: AeroSettings.ollamaUrl);
+    final modelCtrl = TextEditingController(text: AeroSettings.ollamaModel);
+    showDialog(
+      context: context,
+      builder: (ctx) => ListenableBuilder(
+        listenable: _router,
+        builder: (ctx, _) => AlertDialog(
+          title: const Text('AERO Engines'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(10)),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(_router.engineLabel, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
+                  const SizedBox(height: 4),
+                  Text('${_router.deviceLabel} • ${DateFormat('h:mm a EEE MMM d').format(DateTime.now())}',
+                      style: const TextStyle(color: Colors.white70, fontSize: 10)),
+                ]),
+              ),
+              const SizedBox(height: 8),
+              ...AeroArchitectureService.getEngines(_router).map((e) => ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    visualDensity: VisualDensity.compact,
+                    leading: Icon(e.ready ? Icons.check_circle : e.icon, size: 18, color: e.ready ? Colors.green : Colors.grey),
+                    title: Text(e.name + (e.active ? '  • in use' : ''), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                    subtitle: Text(e.availability, style: TextStyle(fontSize: 10, color: e.ready ? Colors.green.shade700 : Colors.grey.shade600)),
+                  )),
+              const Divider(height: 20),
+              ValueListenableBuilder<double?>(
+                valueListenable: AeroOnDeviceService.downloadProgress,
+                builder: (ctx, progress, _) {
+                  if (progress != null) {
+                    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      LinearProgressIndicator(value: progress > 0 ? progress : null),
+                      const SizedBox(height: 4),
+                      Text('${(progress * 100).toStringAsFixed(1)}% — keep Onyx Beacon open until it finishes', style: const TextStyle(fontSize: 10)),
+                    ]);
+                  }
+                  if (_router.hasModel) {
+                    return Row(children: [
+                      Expanded(child: Text('TinyLlama: ${_router.modelSizeMB} MB on this device', style: const TextStyle(fontSize: 11))),
+                      TextButton.icon(
+                        icon: const Icon(Icons.delete_outline, size: 16),
+                        label: const Text('Delete', style: TextStyle(fontSize: 11)),
+                        onPressed: () async {
+                          await AeroOnDeviceService.deleteModel();
+                          await _router.detect(force: true);
+                        },
+                      ),
+                    ]);
+                  }
+                  return SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      icon: const Icon(Icons.download, size: 16),
+                      label: const Text('Download offline model (~640 MB, once)'),
+                      onPressed: _startDownload,
+                    ),
+                  );
+                },
+              ),
+              const Divider(height: 20),
+              const Text('Ollama on your Surface (optional)', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 6),
+              TextField(controller: urlCtrl, style: const TextStyle(fontSize: 12),
+                  decoration: const InputDecoration(labelText: 'Ollama URL', hintText: 'http://192.168.1.15:11434', border: OutlineInputBorder(), isDense: true)),
+              const SizedBox(height: 6),
+              TextField(controller: modelCtrl, style: const TextStyle(fontSize: 12),
+                  decoration: const InputDecoration(labelText: 'Model', hintText: 'llama3', border: OutlineInputBorder(), isDense: true)),
+            ]),
+          ),
+          actions: [
+            TextButton(onPressed: () => _router.detect(force: true), child: Text(_router.detecting ? 'Checking…' : 'Re-check')),
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
+            ElevatedButton(
+              onPressed: () async {
+                await AeroSettings.save(url: urlCtrl.text, model: modelCtrl.text);
+                if (ctx.mounted) Navigator.pop(ctx);
+                await _router.detect(force: true);
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showAeroArchitecture() {
+    showDialog(
+      context: context,
+      builder: (ctx) => ListenableBuilder(
+        listenable: _router,
+        builder: (ctx, _) => AlertDialog(
+          title: const Text('AERO — 4-Engine Architecture'),
+          content: SingleChildScrollView(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('Think of AERO like a car brand: AERO is the name on the dashboard, the memory and the SQLite brain. '
+                  'The engine that talks is swapped automatically.', style: TextStyle(fontSize: 11)),
+              const SizedBox(height: 10),
+              ...AeroArchitectureService.getEngines(_router).map((e) => Card(
+                    color: e.color.withValues(alpha: e.active ? 0.22 : 0.08),
+                    child: ListTile(
+                      leading: Icon(e.ready ? Icons.check_circle : e.icon, color: e.ready ? Colors.green : Colors.grey, size: 22),
+                      title: Text(e.name + (e.active ? '  • in use' : ''), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                      subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text(e.subtitle, style: TextStyle(fontSize: 10, fontStyle: FontStyle.italic, color: e.color)),
+                        const SizedBox(height: 2),
+                        Text(e.description, style: const TextStyle(fontSize: 10)),
+                        const SizedBox(height: 4),
+                        Text(e.availability, style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: e.ready ? Colors.green.shade700 : Colors.grey.shade700)),
+                      ]),
+                    ),
+                  )),
+              const SizedBox(height: 8),
+              const Text('Order: Core shortcut → TinyLlama → Apple Intelligence → Ollama → Core. '
+                  'If an engine fails mid-answer, the next one takes over without asking.', style: TextStyle(fontSize: 10, color: Colors.grey)),
+            ]),
+          ),
+          actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close'))],
+        ),
+      ),
+    );
   }
 
   Future<void> _startListening() async {
-    if (Platform.isWindows || Platform.isLinux) {
-      if(mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Voice input works on iPhone/Android/macOS. On desktop, use your keyboard mic.')));
-      return;
-    }
     try {
       final avail = await _speech.initialize(
-        onError: (_){ if(mounted) setState(()=>_listening=false); },
-        onStatus: (s){ if((s=='done'||s=='notListening') && mounted) setState(()=>_listening=false); },
+        onError: (e) { if (mounted) setState(() => _listening = false); },
+        onStatus: (s) { if ((s == 'done' || s == 'notListening') && mounted) setState(() => _listening = false); },
       );
-      if(!avail) return;
-      setState(()=>_listening=true);
-      await _speech.listen(onResult: (res){ if(mounted) setState(()=>_inputCtrl.text = res.recognizedWords); });
-    } catch(_){ if(mounted) setState(()=>_listening=false); }
+      if (!avail) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Allow Microphone and Speech Recognition for Onyx Beacon in Settings.')));
+        }
+        return;
+      }
+      setState(() => _listening = true);
+      await _speech.listen(
+        onResult: (res) { if (mounted) setState(() => _inputCtrl.text = res.recognizedWords); },
+        listenOptions: SpeechListenOptions(
+          partialResults: true,
+          listenFor: const Duration(seconds: 60),
+          pauseFor: const Duration(seconds: 5),
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        setState(() => _listening = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Mic error: $e')));
+      }
+    }
   }
 
-  void _stopListening(){
-    try { _speech.stop(); } catch(_){}
-    if(mounted) setState(()=>_listening=false);
+  void _stopListening() {
+    try { _speech.stop(); } catch (_) {}
+    if (mounted) setState(() => _listening = false);
   }
 
-  void _scrollToBottom(){
-    WidgetsBinding.instance.addPostFrameCallback((_){
-      if(_scrollCtrl.hasClients){
-        _scrollCtrl.animateTo(_scrollCtrl.position.maxScrollExtent + 120, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollCtrl.hasClients) {
+        _scrollCtrl.animateTo(_scrollCtrl.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
       }
     });
   }
 
-  @override
-  Widget build(BuildContext context){
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('AERO — Real AI + Bible'),
-        actions: [
-          IconButton(icon: Icon(_online==true?Icons.circle:Icons.circle_outlined, color: _online==true?Colors.green:Colors.grey, size:12), tooltip: _online==true?'Online':'Offline', onPressed: _checkOnline),
-          IconButton(icon: const Icon(Icons.settings), onPressed: _showAeroSettings),
-          IconButton(icon: const Icon(Icons.refresh), onPressed: _checkOnline),
-          PopupMenuButton<String>(onSelected: (v){ if(v=='clear') setState(()=>_messages.clear()); }, itemBuilder: (c)=>[const PopupMenuItem(value:'clear', child: Text('Clear Chat'))]),
-        ],
+  Widget _statusChip() {
+    return ValueListenableBuilder<double?>(
+      valueListenable: AeroOnDeviceService.downloadProgress,
+      builder: (ctx, progress, _) {
+        final r = _router;
+        String text;
+        Color bg;
+        IconData icon;
+        Widget? action;
+        if (progress != null) {
+          text = 'Downloading offline model ${(progress * 100).toStringAsFixed(0)}% • keep app open';
+          bg = Colors.blue.shade50;
+          icon = Icons.downloading;
+        } else if (r.hasModel) {
+          text = '${r.modelSizeMB} MB on-device ready • VPN ON ok • offline';
+          bg = Colors.green.shade50;
+          icon = Icons.check_circle;
+        } else if (r.appleAvailable) {
+          text = 'Apple Intelligence on-device • private';
+          bg = Colors.deepPurple.shade50;
+          icon = Icons.auto_awesome;
+        } else {
+          text = 'Core instant • download ~640 MB once for full offline AI';
+          bg = Colors.grey.shade100;
+          icon = Icons.memory;
+          action = TextButton(onPressed: _startDownload, child: const Text('Download', style: TextStyle(fontSize: 11)));
+        }
+        return Container(
+          color: bg,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Row(children: [
+              Icon(icon, size: 14, color: Colors.black54),
+              const SizedBox(width: 6),
+              Expanded(child: Text(text, style: const TextStyle(fontSize: 11))),
+              if (action != null) action,
+            ]),
+            if (progress != null) LinearProgressIndicator(value: progress > 0 ? progress : null, minHeight: 2),
+          ]),
+        );
+      },
+    );
+  }
+
+  Widget _bubble(AeroMessage msg) {
+    final isUser = msg.isUser;
+    final waiting = msg.streaming && msg.text.isEmpty;
+    return Align(
+      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.all(12),
+        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.82),
+        decoration: BoxDecoration(
+          color: isUser ? Colors.black : Colors.grey.shade100,
+          borderRadius: BorderRadius.only(
+            topLeft: const Radius.circular(16), topRight: const Radius.circular(16),
+            bottomLeft: Radius.circular(isUser ? 16 : 4), bottomRight: Radius.circular(isUser ? 4 : 16),
+          ),
+          border: Border.all(color: isUser ? Colors.black : Colors.grey.shade300),
+        ),
+        child: waiting
+            ? Row(mainAxisSize: MainAxisSize.min, children: [
+                const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
+                const SizedBox(width: 8),
+                Text(_router.primary == AeroEngine.tinyllama ? 'Loading model… first answer can take ~20 s' : 'AERO thinking…',
+                    style: const TextStyle(fontSize: 12, color: Colors.grey)),
+              ])
+            : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                SelectableText(msg.text, style: TextStyle(color: isUser ? Colors.white : Colors.black87, fontSize: 13)),
+                if (!isUser && msg.engine != null) ...[
+                  const SizedBox(height: 6),
+                  Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(msg.engine!.icon, size: 11, color: Colors.grey),
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Text(msg.engine!.shortName + (msg.note != null ? ' • ${msg.note}' : ''),
+                          style: const TextStyle(fontSize: 9, color: Colors.grey)),
+                    ),
+                  ]),
+                ],
+              ]),
       ),
-      body: Column(
-        children: [
-          if(_online==false && !_bannerDismissed)
-            Dismissible(
-              key: const ValueKey('offline_banner'),
-              direction: DismissDirection.up,
-              onDismissed: (_){ setState(()=>_bannerDismissed=true); },
-              child: Container(
-                color: Colors.orange.shade100,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: _router,
+      builder: (context, _) {
+        final msgs = _router.messages;
+        return Scaffold(
+          appBar: AppBar(
+            title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('AERO', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              Text(_router.detecting ? 'Detecting engines…' : _router.engineLabel, style: const TextStyle(fontSize: 10, color: Colors.grey)),
+            ]),
+            actions: [
+              IconButton(icon: const Icon(Icons.auto_awesome, size: 18), tooltip: 'Architecture', onPressed: _showAeroArchitecture),
+              IconButton(icon: const Icon(Icons.settings, size: 18), tooltip: 'Engines', onPressed: _showAeroSettings),
+              PopupMenuButton<String>(
+                onSelected: (v) {
+                  if (v == 'clear') _router.clear();
+                  if (v == 'detect') _router.detect(force: true);
+                },
+                itemBuilder: (c) => const [
+                  PopupMenuItem(value: 'detect', child: Text('Re-detect engines')),
+                  PopupMenuItem(value: 'clear', child: Text('Clear chat')),
+                ],
+              ),
+            ],
+          ),
+          body: Column(children: [
+            _statusChip(),
+            Expanded(
+              child: ListView.builder(
+                controller: _scrollCtrl,
+                padding: const EdgeInsets.all(12),
+                itemCount: msgs.length + 1,
+                itemBuilder: (ctx, idx) {
+                  if (idx == 0) return _bubble(AeroMessage(isUser: false, text: _welcome));
+                  return _bubble(msgs[idx - 1]);
+                },
+              ),
+            ),
+            const Divider(height: 1),
+            SafeArea(
+              top: false,
+              child: Padding(
                 padding: const EdgeInsets.all(8),
-                child: Row(children:[
-                  const Icon(Icons.warning_amber, size:16),
-                  const SizedBox(width:6),
-                  const Expanded(child: Text('AERO offline — Windows: ollama run llama3. iPhone: set to http://192.168.1.15:11434', style: TextStyle(fontSize:11))),
-                  TextButton(onPressed: _checkOnline, child: const Text('Retry')),
-                  IconButton(icon: const Icon(Icons.close, size:16), onPressed: ()=>setState(()=>_bannerDismissed=true)),
+                child: Row(children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _inputCtrl,
+                      minLines: 1,
+                      maxLines: 4,
+                      textInputAction: TextInputAction.send,
+                      decoration: InputDecoration(
+                        hintText: 'Ask AERO — Bible, habits, writing, time…',
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(24)),
+                        isDense: true,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                      ),
+                      onSubmitted: (_) => _send(),
+                    ),
+                  ),
+                  if (_voiceSupported) ...[
+                    const SizedBox(width: 8),
+                    CircleAvatar(
+                      backgroundColor: _listening ? Colors.red : Colors.grey.shade200,
+                      child: IconButton(
+                        icon: Icon(_listening ? Icons.mic_off : Icons.mic, color: _listening ? Colors.white : Colors.black87, size: 18),
+                        onPressed: () { if (_listening) { _stopListening(); } else { _startListening(); } },
+                      ),
+                    ),
+                  ],
+                  const SizedBox(width: 6),
+                  CircleAvatar(
+                    backgroundColor: _router.busy ? Colors.grey : Colors.black,
+                    child: IconButton(icon: const Icon(Icons.send, color: Colors.white, size: 18), onPressed: _router.busy ? null : _send),
+                  ),
                 ]),
               ),
             ),
-          Expanded(
-            child: ListView.builder(
-              controller: _scrollCtrl,
-              padding: const EdgeInsets.all(12),
-              itemCount: _messages.length + (_isLoading?1:0),
-              itemBuilder: (ctx, idx){
-                if(idx==_messages.length && _isLoading){
-                  return const Padding(padding: EdgeInsets.all(8), child: Row(children:[SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2)), SizedBox(width:8), Text('Thinking...', style: TextStyle(fontSize:12, color: Colors.grey))]));
-                }
-                final msg = _messages[idx];
-                final isUser = msg['role']=='user';
-                return Align(
-                  alignment: isUser?Alignment.centerRight:Alignment.centerLeft,
-                  child: Container(
-                    margin: const EdgeInsets.symmetric(vertical:4),
-                    padding: const EdgeInsets.all(12),
-                    constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width*0.8),
-                    decoration: BoxDecoration(
-                      color: isUser?Colors.blue.shade600:Colors.grey.shade200,
-                      borderRadius: BorderRadius.only(
-                        topLeft: const Radius.circular(16),
-                        topRight: const Radius.circular(16),
-                        bottomLeft: Radius.circular(isUser?16:4),
-                        bottomRight: Radius.circular(isUser?4:16),
-                      ),
-                    ),
-                    child: Text(msg['text']??'', style: TextStyle(color: isUser?Colors.white:Colors.black87, fontSize:13)),
-                  ),
-                );
-              },
-            ),
-          ),
-          const Divider(height:1),
-          Padding(
-            padding: const EdgeInsets.all(8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _inputCtrl,
-                    minLines:1,
-                    maxLines:4,
-                    decoration: InputDecoration(
-                      hintText: 'Ask AI — summarize week, improve writing, brainstorm...',
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(24)),
-                      isDense: true,
-                      contentPadding: const EdgeInsets.symmetric(horizontal:16, vertical:10),
-                    ),
-                    onSubmitted: (_)=>_sendMessage(),
-                  ),
-                ),
-                const SizedBox(width:8),
-                CircleAvatar(
-                  backgroundColor: _listening ? Colors.red : Colors.grey.shade200,
-                  child: IconButton(icon: Icon(_listening ? Icons.mic_off : Icons.mic, color: _listening ? Colors.white : Colors.black87, size:18), onPressed: (){ if(_listening) _stopListening(); else _startListening(); }),
-                ),
-                const SizedBox(width:6),
-                CircleAvatar(
-                  backgroundColor: Colors.blue,
-                  child: IconButton(icon: const Icon(Icons.send, color: Colors.white, size:18), onPressed: _sendMessage),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
+          ]),
+        );
+      },
     );
   }
 }

@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.0+10
+version: 1.0.0+11
 
 environment:
   sdk: ^3.13.5
@@ -60,19 +60,24 @@ dependencies:
   flame: ^1.32.0
   flame_audio: 2.12.2
   audioplayers: 6.8.1
-  # PUSH 4 Sovereign — True Phone Offline AERO (on-device TinyLlama) — FINAL
+  # AERO Engine 1 — on-device TinyLlama. Pinned to the commit whose prebuilt native libraries
+  # (native_artifacts/prebuilt.json, source key 38a971f2…) match its sources, so the build hook
+  # DOWNLOADS ready-made libraries (iOS arm64, Windows arm64/x64) instead of compiling llama.cpp.
+  # Floating `ref: main` is what caused "package sources differ" — main moves past its prebuilts.
   fllama:
     git:
       url: https://github.com/Telosnex/fllama.git
-      ref: main
+      ref: 8969049d2b71f1aa353f11d4ce82367d15291c7b
 
-# Fix fllama prebuilt mismatch on git main - force source build
-# This makes Windows build from source (requires CMake, takes ~5-16min first time)
-# For iPhone 13 / 17 Pro Max, Xcode builds llama.cpp natively - AI will work
+# fllama build hook settings. Valid native_build values are ONLY: auto | download | source.
+# The old value "prebuilt" is not one of them — the hook threw FormatException, which is the
+# "Target build_hooks failed: Building native assets failed" line in the Windows log.
+#   auto (default) = download prebuilt if it matches, otherwise compile from source.
+# web_build is removed: its only values are download | local, and this app does not target web.
 hooks:
   user_defines:
     fllama:
-      native_build: source
+      native_build: auto
 
 dev_dependencies:
   flutter_test:
