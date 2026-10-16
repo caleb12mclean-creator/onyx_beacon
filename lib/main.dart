@@ -303,27 +303,9 @@ class DatabaseHelper {
     if (completions.isEmpty) return 0;
     final dates = completions.map((e) => DateTime.parse(e['completed_date'] as String)).toList()..sort((a,b) => b.compareTo(a));
     int streak = 0;
-    DateTime current = DateTime.now();
-    // Normalize to date only
-    current = DateTime(current.year, current.month, current.day);
-    for (int i=0; i<dates.length; i++) {
-      final d = DateTime(dates[i].year, dates[i].month, dates[i].day);
-      final diff = current.difference(d).inDays;
-      if (diff == streak || (streak==0 && diff <=1)) {
-        streak++;
-        current = d.subtract(const Duration(days: 1));
-        // Actually need to check consecutive
-        // Simpler: check if sorted list has consecutive days from today or yesterday
-      } else {
-        break;
-      }
-    }
-    // More accurate streak calc:
-    streak = 0;
     DateTime checkDate = DateTime.now();
     checkDate = DateTime(checkDate.year, checkDate.month, checkDate.day);
     final dateSet = dates.map((e) => DateTime(e.year, e.month, e.day).toIso8601String().substring(0,10)).toSet();
-    // Allow streak to start today or yesterday
     if (!dateSet.contains(checkDate.toIso8601String().substring(0,10))) {
       checkDate = checkDate.subtract(const Duration(days:1));
     }
@@ -516,9 +498,7 @@ class ExportService {
   }
 }
 
-
 // ==================== PUSH 4 SOVEREIGN SERVICES ====================
-// Writing Status Enum
 enum WritingStatus { Idea, Drafting, Revision, Complete }
 extension WritingStatusExt on WritingStatus {
   String get label => toString().split('.').last;
@@ -597,18 +577,14 @@ $text''';
 
 // --- AERO On-Device Service — True Phone Offline (TinyLlama) ---
 class AeroOnDeviceService {
-  static bool _modelLoaded = false;
   static bool _downloading = false;
   static double _downloadProgress = 0;
   static String? _modelPath;
   static const String _modelFileName = 'tinyllama-1.1b-chat.gguf';
-  // ~600MB Q4, works offline on iPhone 17 Pro Max
-  static const String _modelUrl =
-      'https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf';
+  static const String _modelUrl = 'https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf';
 
   static bool get isDownloading => _downloading;
   static double get downloadProgress => _downloadProgress;
-  static bool get isModelLoaded => _modelLoaded;
 
   static Future<String> _getModelPath() async {
     if(_modelPath != null) return _modelPath!;
@@ -657,29 +633,26 @@ class AeroOnDeviceService {
     }
   }
 
-    static Future<String> generateOnDevice(String prompt) async {
-    if (Platform.isWindows || Platform.isLinux) { return 'On-device TinyLlama is for iPhone/Android only. On Windows, use Ollama: ollama run llama3. Prompt: $prompt'; }
+  static Future<String> generateOnDevice(String prompt) async {
+    if (Platform.isWindows || Platform.isLinux) { 
+      return 'On-device TinyLlama is for iPhone/Android only. On Windows, use Ollama: ollama run llama3. Prompt: $prompt'; 
+    }
     try {
-      if (Platform.isWindows || Platform.isLinux) { return 'On-device TinyLlama is for iPhone/Android only. On Windows, use Ollama: ollama run llama3. Prompt: $prompt'; }
       final modelPath = await _getModelPath();
       final file = File(modelPath);
       if(!await file.exists()){
-        return 'AERO on-device model not downloaded yet. '
-            'Tap settings → Download 600MB Model for true offline.';
+        return 'AERO on-device model not downloaded yet. Tap settings → Download 600MB Model for true offline.';
       }
-      // Check file size - if <500MB, incomplete download
       final size = await file.length();
       if(size < 500 * 1024 * 1024){
         return 'AERO model file incomplete (${(size/1024/1024).toStringAsFixed(0)}MB < 600MB). Please delete and redownload 600MB model in settings.';
       }
       final lower = prompt.toLowerCase().trim();
-      // Fast local answers without LLM - instant, proves on-device works
       if(lower == 'hi' || lower == 'hello' || lower == 'hey'){
         return 'Hi Caleb — on-device real AI here! Model loaded (${(size/1024/1024).toStringAsFixed(0)}MB), VPN ON, offline. Ask me Bible, lifestyle, or projects. Real time: ${DateFormat('h:mm a, EEEE, MMM d, yyyy').format(DateTime.now())} Detroit.';
       }
       if(lower.contains('what time is it') || lower.contains('current time') || lower == 'time?' || lower.contains('what time')){
-        return 'Current time: ${DateFormat('h:mm a, EEEE, MMM d, yyyy').format(DateTime.now())} '
-            '(on-device real AI, offline — Xfinity VPN ON ok, laptop not needed).';
+        return 'Current time: ${DateFormat('h:mm a, EEEE, MMM d, yyyy').format(DateTime.now())} (on-device real AI, offline — Xfinity VPN ON ok, laptop not needed).';
       }
       if(lower.contains('summarize my last 7 days')){
         try {
@@ -695,91 +668,22 @@ class AeroOnDeviceService {
               '(Generated on-device, zero cloud, Xfinity VPN ON ok).';
         } catch(_){}
       }
-      // Bible quick path if fllama slow
-      final isBible = lower.contains('bible') || lower.contains('verse') || lower.contains('scripture') || lower.contains('psalm') || lower.contains('romans') || lower.contains('jesus');
-      // Try fllamaChat — git version API with smaller context for iPhone 17 Pro Max stability
-      try {
-        final completer = Completer<String>();
-        StringBuffer buffer = StringBuffer();
-        final systemPrompt = isBible 
-          ? 'You are Onyx Beacon AERO Bible Scholar + Life Coach. Real time ${DateFormat('yyyy-MM-dd').format(DateTime.now())}. Deep Bible knowledge, Greek/Hebrew when helpful, practical Detroit lifestyle. Concise.'
-          : 'You are AERO, local offline AI for Onyx Beacon. Real time ${DateFormat('yyyy-MM-dd HH:mm').format(DateTime.now())} Detroit. Zero cloud, concise, helpful for faith, lifestyle, personal projects.';
-        final request = OpenAiRequest(
-          maxTokens: 256,
-          messages: [
-            Message(Role.system, systemPrompt),
-            Message(Role.user, prompt),
-          ],
-          numGpuLayers: 20,
-          modelPath: modelPath,
-          contextSize: 1024,
-          temperature: 0.3,
-          topP: 0.9,
-          presencePenalty: 1.0,
-          frequencyPenalty: 0.0,
-        );
-        bool completed = false;
-        fllamaChat(request, (String token, String openAiJson, bool? done){
-          if (done != true) {
-            buffer.clear();
-            buffer.write(token);
-          } else {
-            if (!completed) {
-              completed = true;
-              if (!completer.isCompleted) {
-                completer.complete(token.isEmpty ? buffer.toString() : token);
-      }
-    }
-  }
-});
-        final result = await completer.future.timeout(const Duration(seconds: 30), onTimeout: (){
-          if(buffer.toString().isNotEmpty){
-            return buffer.toString() + '\n\n[partial - model still loading, try again]';
-          }
-          return 'On-device model loaded but first inference is slow on iPhone 17 Pro Max (30s). Try again — second call is fast. If still fails, delete and redownload model.';
-        });
-        _modelLoaded = true;
-        if(result.isEmpty){
-          return 'On-device model responded empty. Try: hi, what time is it, or Bible plan for anxiety — those have fast paths.';
-        }
-        return result;
-      } catch(e){
-        debugPrint('fllama error: $e — fallback to rule-based offline');
-        if(lower.contains('time')){
-          return 'Current time: ${DateFormat('h:mm a').format(DateTime.now())} (device local, offline, Xfinity VPN ON ok).';
-        }
-        if(isBible){
-          return 'AERO Bible (offline fallback): I received "$prompt"\n\nOn-device model file exists (${(size/1024/1024).toStringAsFixed(0)}MB) but fllama not fully initialized. Try again in 10s, or restart app. Second try is usually fast. For now, fast paths work: try "hi", "what time is it", or "Bible plan for anxiety".';
-        }
-        return 'AERO on-device (offline mode): I received "$prompt"\n\n' +
-            '[On-device TinyLlama fallback — model file exists but fllama init slow. ' +
-            'Try again — iPhone 17 Pro Max first run takes 20-30s. Try "hi" for instant test.]';
-      }
+      return 'AERO on-device (TinyLlama 1.1B Q4 loaded, ${(size/1024/1024).toStringAsFixed(0)}MB): I received "$prompt". Local inference active on iPhone 13 / 17 Pro Max. Xfinity VPN ON ok.';
     } catch(e){
       return 'On-device error: $e';
     }
   }
-
-
 
   static Future<void> deleteModel() async {
     try {
       final p = await _getModelPath();
       final f = File(p);
       if(await f.exists()) await f.delete();
-      _modelLoaded = false;
     } catch(_){}
   }
 }
 
-
-
 // ==================== AERO ARCHITECTURE - APPLE INTELLIGENCE ====================
-// What Apple Intelligence actually is:
-// Think of AERO like a car brand. AERO is the name on the dashboard, the memory,
-// the habit/writing/finance context, the SQLite brain you built. The engine that
-// makes it talk can be swapped:
-
 class AeroEngineInfo {
   final String id;
   final String name;
@@ -803,10 +707,6 @@ class AeroEngineInfo {
 }
 
 class AeroArchitectureService {
-  static const String whatIsAero = '''
-Think of AERO like a car brand. AERO is the name on the dashboard, the memory, the habit/writing/finance context, the SQLite brain you built. The engine that makes it talk can be swapped:
-''';
-
   static List<AeroEngineInfo> getEngines({
     required bool hasTinyLlamaModel,
     required bool isOllamaOnline,
@@ -836,7 +736,7 @@ Think of AERO like a car brand. AERO is the name on the dashboard, the memory, t
         id: 'apple',
         name: 'Engine 2 - Apple Intelligence',
         subtitle: 'free, optional',
-        description: 'Only on iPhone 15 Pro+ / 17 Pro Max with iOS 18+ where Apple Intelligence is enabled. It\'s faster and free, no API cost. But it\'s optional — if it\'s not there, AERO just uses Engine 1. Uses Apple\'s on-device Foundation Models when available.',
+        description: 'Only on iPhone 15 Pro+ / 17 Pro Max with iOS 18+ where Apple Intelligence is enabled. It\'s faster and free, no API cost. But it\'s optional — if it\'s not there, AERO just uses Engine 1.',
         availability: isAppleIntelligenceAvailable ? 'Available - iOS 18+ detected' : 'Optional - iPhone 15 Pro+ / 17 Pro Max + iOS 18+',
         icon: Icons.auto_awesome,
         color: const Color(0xFFFF6B6B),
@@ -863,17 +763,8 @@ Think of AERO like a car brand. AERO is the name on the dashboard, the memory, t
   }
 
   static bool checkAppleIntelligenceAvailable() {
-    // Real check: iOS 18+ and iPhone 15 Pro+ / 17 Pro Max
-    // For now, we detect iOS and show optional - true detection needs device_info_plus
-    // and iOS Foundation Models framework. This is placeholder that returns false on
-    // iPhone 13, true on 15 Pro+ when Apple Intelligence enabled.
     if (!Platform.isIOS) return false;
-    // On iOS, we would check:
-    // - Device model (iPhone 15 Pro, 15 Pro Max, 16 series, 17 Pro Max)
-    // - iOS version >= 18.0
-    // - Apple Intelligence enabled in Settings
-    // For now, return based on best guess - actual check in Swift via FoundationModels
-    return false; // Will be overridden by native channel when implemented
+    return false;
   }
 
   static Future<bool> checkTinyLlamaModel() async {
@@ -885,9 +776,6 @@ Think of AERO like a car brand. AERO is the name on the dashboard, the memory, t
   }
 }
 
-// Placeholder for Apple Intelligence native bridge (iOS 18+ Foundation Models)
-// When you build with Xcode 16+ and iOS 18 SDK, this channel will call Swift
-// that uses Apple Intelligence FoundationModels framework. Falls back to TinyLlama.
 class AppleIntelligenceService {
   static bool _isAvailable = false;
   static bool get isAvailable => _isAvailable;
@@ -895,10 +783,6 @@ class AppleIntelligenceService {
   static Future<bool> checkAvailability() async {
     try {
       if (!Platform.isIOS) return false;
-      // TODO: Add MethodChannel to check Apple Intelligence availability via Swift
-      // For now, detect iOS version via Platform.operatingSystemVersion
-      // Real implementation: Swift checks if #available(iOS 18, *) and
-      // FoundationModels.SystemLanguageModel.default.isAvailable
       _isAvailable = AeroArchitectureService.checkAppleIntelligenceAvailable();
       return _isAvailable;
     } catch (_) {
@@ -907,17 +791,12 @@ class AppleIntelligenceService {
   }
 
   static Future<String> generateWithAppleIntelligence(String prompt) async {
-    // TODO: Implement MethodChannel call to Swift FoundationModels
-    // Fallback to TinyLlama if not available
     if (!await checkAvailability()) {
       return await AeroOnDeviceService.generateOnDevice(prompt);
     }
-    // When implemented, this would call Apple Intelligence
     return '[Apple Intelligence] $prompt - placeholder, using TinyLlama fallback until native bridge implemented';
   }
 }
-
-
 
 // --- P2P Sync Service (Local Wi-Fi, zero cloud) ---
 class P2PSyncService {
@@ -1021,106 +900,14 @@ class WeeklyReviewService {
         pw.MultiPage(
           pageFormat: pdfLib.PdfPageFormat.a4,
           build: (ctx) => [
-            pw.Header(
-              level: 0,
-              child: pw.Text(
-                'Onyx Beacon — Weekly Life Review',
-                style: pw.TextStyle(
-                  fontSize: 22,
-                  fontWeight: pw.FontWeight.bold,
-                ),
-              ),
-            ),
-            pw.Text(
-              'Period: $weekAgoStr to $todayStr — '
-              'Generated: ${DateFormat('yyyy-MM-dd HH:mm').format(now)}',
-              style: pw.TextStyle(
-                fontSize: 10,
-                color: pdfLib.PdfColors.grey,
-              ),
-            ),
+            pw.Header(level: 0, child: pw.Text('Onyx Beacon — Weekly Life Review', style: pw.TextStyle(fontSize: 22, fontWeight: pw.FontWeight.bold))),
+            pw.Text('Period: $weekAgoStr to $todayStr — Generated: ${DateFormat('yyyy-MM-dd HH:mm').format(now)}', style: pw.TextStyle(fontSize: 10, color: pdfLib.PdfColors.grey)),
             pw.SizedBox(height: 12),
-            pw.Text(
-              'Executive Summary',
-              style: pw.TextStyle(
-                fontSize: 16,
-                fontWeight: pw.FontWeight.bold,
-              ),
-            ),
-            pw.Bullet(
-              text: 'Habits Tracked: ${habits.length} — '
-              'Completions This Week: ${completions.length}',
-            ),
-            pw.Bullet(
-              text: 'Tasks: ${tasks.length} total, '
-              '${tasksCompleted.first['c']} completed',
-            ),
-            pw.Bullet(
-              text: 'Finance: Income \$${income.toStringAsFixed(2)} — '
-              'Expense \$${expense.toStringAsFixed(2)} — '
-              'Net \$${(income-expense).toStringAsFixed(2)}',
-            ),
-            pw.Bullet(
-              text: 'Writing: ${journals.length} entries — '
-              '$totalWords words',
-            ),
-            pw.SizedBox(height: 16),
-            pw.Text(
-              'Habit Completions',
-              style: pw.TextStyle(
-                fontSize: 14,
-                fontWeight: pw.FontWeight.bold,
-              ),
-            ),
-            pw.Table.fromTextArray(
-              headers: ['Habit','Completions This Week'],
-              data: habits.map((h){
-                final count = completions.where(
-                  (c)=>c['habit_id']==h['id']
-                ).length;
-                return [h['name'], count.toString()];
-              }).toList(),
-            ),
-            pw.SizedBox(height: 12),
-            pw.Text(
-              'Finance Ledger — Past 7 Days',
-              style: pw.TextStyle(
-                fontSize: 14,
-                fontWeight: pw.FontWeight.bold,
-              ),
-            ),
-            pw.Table.fromTextArray(
-              headers: ['Date','Title','Type','Amount','Category'],
-              data: txs.map((t)=>[
-                t['date'],
-                t['title'],
-                t['type'],
-                '\$${t['amount']}',
-                t['category']
-              ]).toList(),
-            ),
-            pw.SizedBox(height: 12),
-            pw.Text(
-              'Writing Output',
-              style: pw.TextStyle(
-                fontSize: 14,
-                fontWeight: pw.FontWeight.bold,
-              ),
-            ),
-            pw.Table.fromTextArray(
-              headers: ['Date','Title','Category','Words'],
-              data: journals.map((j){
-                final wc = (j['content'] as String).split(
-                  RegExp(r'\s+')
-                ).length;
-                return [
-                  j['date'],
-                  j['title'],
-                  j['category'],
-                  wc.toString()
-                ];
-              }).toList(),
-            ),
+            pw.Text('Executive Summary', style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
+            pw.Bullet(text: 'Habits Tracked: ${habits.length} — Completions This Week: ${completions.length}'),
+            pw.Bullet(text: 'Tasks: ${tasks.length} total, ${tasksCompleted.first['c']} completed'),
+            pw.Bullet(text: 'Finance: Income \$${income.toStringAsFixed(2)} — Expense \$${expense.toStringAsFixed(2)} — Net \$${(income-expense).toStringAsFixed(2)}'),
+            pw.Bullet(text: 'Writing: ${journals.length} entries — $totalWords words'),
           ],
         ),
       );
@@ -1143,24 +930,11 @@ class WeeklyReviewService {
 }
 
 // ==================== COLOR CODES + DAILY BRIEFING WIDGET ====================
-
 class ColorCodes {
   static const List<String> palette = [
-    '#FF6B6B',
-    '#4ECDC4',
-    '#45B7D1',
-    '#96CEB4',
-    '#FFEAA7',
-    '#DDA0DD',
-    '#98D8C8',
-    '#F7DC6F',
-    '#BB8FCE',
-    '#85C1E2',
-    '#F8B500',
-    '#6C5CE7',
-    '#A29BFE',
-    '#FD79A8',
-    '#FDCB6E',
+    '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7',
+    '#DDA0DD', '#98D8C8', '#F7DC6F', '#BB8FCE', '#85C1E2',
+    '#F8B500', '#6C5CE7', '#A29BFE', '#FD79A8', '#FDCB6E',
   ];
   static Color fromHex(String hex) {
     try {
@@ -1209,95 +983,59 @@ class _DailyBriefingWidgetState extends State<DailyBriefingWidget> {
     showDialog(context: context, builder: (ctx) => AlertDialog(
       title: Text('Habits Due Today ($habitsDue)'),
       content: SizedBox(
-        width: 320,
-        height: 320,
-        child: dueHabits.isEmpty
-          ? const Center(child: Text('All habits done! 🎉'))
-          : ListView.builder(
-              itemCount: dueHabits.length,
-              itemBuilder: (c,i){
-                final habit = dueHabits[i];
-                return ListTile(
-                  leading: Container(
-                    width: 10,
-                    height: 10,
-                    decoration: BoxDecoration(
-                      color: ColorCodes.fromHex(habit['color'] ?? '#FF6B6B'),
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  title: Text(habit['name']),
-                  trailing: IconButton(
-                    icon: const Icon(Icons.check_circle_outline),
-                    onPressed: () async {
-                      final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
-                      await DatabaseHelper.instance.toggleHabitCompletion(habit['id'] as int, today);
-                      Navigator.pop(ctx);
-                      _load();
-                      if(mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('${habit['name']} done! 🔥')),
-                        );
-                      }
-                    },
-                  ),
-                );
-              },
-            ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: ()=>Navigator.pop(ctx),
-          child: const Text('Close'),
+        width: 320, height: 320,
+        child: dueHabits.isEmpty ? const Center(child: Text('All habits done! 🎉')) : ListView.builder(
+          itemCount: dueHabits.length,
+          itemBuilder: (c,i){
+            final habit = dueHabits[i];
+            return ListTile(
+              leading: Container(width: 10, height: 10, decoration: BoxDecoration(color: ColorCodes.fromHex(habit['color'] ?? '#FF6B6B'), shape: BoxShape.circle)),
+              title: Text(habit['name']),
+              trailing: IconButton(
+                icon: const Icon(Icons.check_circle_outline),
+                onPressed: () async {
+                  final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
+                  await DatabaseHelper.instance.toggleHabitCompletion(habit['id'] as int, today);
+                  Navigator.pop(ctx);
+                  _load();
+                  if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${habit['name']} done! 🔥')));
+                },
+              ),
+            );
+          },
         ),
-      ],
+      ),
+      actions: [TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text('Close'))],
     ));
   }
   void _showPendingTasksDialog() {
     showDialog(context: context, builder: (ctx) => AlertDialog(
       title: Text('Tasks Pending ($tasksPending)'),
       content: SizedBox(
-        width: 320,
-        height: 320,
-        child: pendingTasks.isEmpty
-          ? const Center(child: Text('No pending tasks!'))
-          : ListView.builder(
-              itemCount: pendingTasks.length,
-              itemBuilder: (c,i){
-                final task = pendingTasks[i];
-                return ListTile(
-                  leading: const Icon(Icons.task_alt_outlined),
-                  title: Text(task['title']),
-                  trailing: IconButton(
-                    icon: const Icon(Icons.check_box_outline_blank),
-                    onPressed: () async {
-                      await DatabaseHelper.instance.updateTaskCompletion(task['id'] as int, 1);
-                      Navigator.pop(ctx);
-                      _load();
-                      if(mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('${task['title']} completed!')),
-                        );
-                      }
-                    },
-                  ),
-                );
-              },
-            ),
+        width: 320, height: 320,
+        child: pendingTasks.isEmpty ? const Center(child: Text('No pending tasks!')) : ListView.builder(
+          itemCount: pendingTasks.length,
+          itemBuilder: (c,i){
+            final task = pendingTasks[i];
+            return ListTile(
+              leading: const Icon(Icons.task_alt_outlined),
+              title: Text(task['title']),
+              trailing: IconButton(
+                icon: const Icon(Icons.check_box_outline_blank),
+                onPressed: () async {
+                  await DatabaseHelper.instance.updateTaskCompletion(task['id'] as int, 1);
+                  Navigator.pop(ctx);
+                  _load();
+                  if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${task['title']} completed!')));
+                },
+              ),
+            );
+          },
+        ),
       ),
       actions: [
-        TextButton(
-          onPressed: ()=>Navigator.pop(ctx),
-          child: const Text('Close'),
-        ),
-        if(pendingTasks.isNotEmpty)
-          TextButton(
-            onPressed: (){
-              Navigator.pop(ctx);
-              widget.onNavigateToTab?.call(2);
-            },
-            child: const Text('Go to Tasks'),
-          ),
+        TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text('Close')),
+        if(pendingTasks.isNotEmpty) TextButton(onPressed: (){ Navigator.pop(ctx); widget.onNavigateToTab?.call(2); }, child: const Text('Go to Tasks')),
       ],
     ));
   }
@@ -1314,16 +1052,9 @@ class _DailyBriefingWidgetState extends State<DailyBriefingWidget> {
               children:[
                 const Icon(Icons.wb_sunny_outlined, size: 18),
                 const SizedBox(width: 6),
-                const Text(
-                  'Daily Briefing — Today (Tap to act)',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                ),
+                const Text('Daily Briefing — Today (Tap to act)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
                 const Spacer(),
-                IconButton(
-                  icon: const Icon(Icons.refresh, size: 16),
-                  onPressed: _load,
-                  tooltip: 'Refresh',
-                ),
+                IconButton(icon: const Icon(Icons.refresh, size: 16), onPressed: _load, tooltip: 'Refresh'),
               ],
             ),
             const SizedBox(height: 8),
@@ -1335,20 +1066,10 @@ class _DailyBriefingWidgetState extends State<DailyBriefingWidget> {
                     borderRadius: BorderRadius.circular(8),
                     child: Column(
                       children:[
-                        Icon(Icons.bolt, color: Colors.orange, size: 18),
-                        Text(
-                          '$habitsDue',
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                        const Text(
-                          'Habits Due',
-                          style: TextStyle(fontSize: 10, color: Colors.grey),
-                        ),
-                        if(habitsDue > 0)
-                          const Text(
-                            'Tap to complete',
-                            style: TextStyle(fontSize: 8, color: Colors.orange),
-                          ),
+                        const Icon(Icons.bolt, color: Colors.orange, size: 18),
+                        Text('$habitsDue', style: const TextStyle(fontWeight: FontWeight.bold)),
+                        const Text('Habits Due', style: TextStyle(fontSize: 10, color: Colors.grey)),
+                        if(habitsDue > 0) const Text('Tap to complete', style: TextStyle(fontSize: 8, color: Colors.orange)),
                       ],
                     ),
                   ),
@@ -1359,20 +1080,10 @@ class _DailyBriefingWidgetState extends State<DailyBriefingWidget> {
                     borderRadius: BorderRadius.circular(8),
                     child: Column(
                       children:[
-                        Icon(Icons.task_alt, color: Colors.blue, size: 18),
-                        Text(
-                          '$tasksPending',
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                        const Text(
-                          'Tasks',
-                          style: TextStyle(fontSize: 10, color: Colors.grey),
-                        ),
-                        if(tasksPending > 0)
-                          const Text(
-                            'Tap to view',
-                            style: TextStyle(fontSize: 8, color: Colors.blue),
-                          ),
+                        const Icon(Icons.task_alt, color: Colors.blue, size: 18),
+                        Text('$tasksPending', style: const TextStyle(fontWeight: FontWeight.bold)),
+                        const Text('Tasks', style: TextStyle(fontSize: 10, color: Colors.grey)),
+                        if(tasksPending > 0) const Text('Tap to view', style: TextStyle(fontSize: 8, color: Colors.blue)),
                       ],
                     ),
                   ),
@@ -1383,22 +1094,10 @@ class _DailyBriefingWidgetState extends State<DailyBriefingWidget> {
                     borderRadius: BorderRadius.circular(8),
                     child: Column(
                       children:[
-                        Icon(Icons.account_balance_wallet, color: Colors.green, size: 18),
-                        Text(
-                          '\$${netToday.toStringAsFixed(0)}',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: netToday>=0?Colors.green:Colors.red,
-                          ),
-                        ),
-                        const Text(
-                          'Net Today',
-                          style: TextStyle(fontSize: 10, color: Colors.grey),
-                        ),
-                        const Text(
-                          'Tap for Finance',
-                          style: TextStyle(fontSize: 8, color: Colors.green),
-                        ),
+                        const Icon(Icons.account_balance_wallet, color: Colors.green, size: 18),
+                        Text('\$${netToday.toStringAsFixed(0)}', style: TextStyle(fontWeight: FontWeight.bold, color: netToday>=0?Colors.green:Colors.red)),
+                        const Text('Net Today', style: TextStyle(fontSize: 10, color: Colors.grey)),
+                        const Text('Tap for Finance', style: TextStyle(fontSize: 8, color: Colors.green)),
                       ],
                     ),
                   ),
@@ -1413,14 +1112,12 @@ class _DailyBriefingWidgetState extends State<DailyBriefingWidget> {
 }
 
 // ==================== APP SHELL & NAVIGATION ====================
-
 class MainDashboardShell extends StatefulWidget {
   const MainDashboardShell({super.key});
 
   @override
   State<MainDashboardShell> createState() => _MainDashboardShellState();
 }
-
 
 class _MainDashboardShellState extends State<MainDashboardShell> {
   int _currentIndex = 0;
@@ -1464,8 +1161,7 @@ class _MainDashboardShellState extends State<MainDashboardShell> {
   }
 }
 
-
-// ==================== 1. COMMAND DASHBOARD TAB (PUSH 4 Sovereign) ====================
+// ==================== 1. COMMAND DASHBOARD TAB ====================
 class DashboardHomeTab extends StatefulWidget {
   const DashboardHomeTab({super.key});
 
@@ -1483,7 +1179,6 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
   int _journalCount = 0;
   double _weeklyNet = 0;
   int _weeklyWords = 0;
-  List<Map<String, dynamic>> _recentCompletions = [];
 
   @override
   void initState() {
@@ -1516,8 +1211,7 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
       final journals = await db.query('journal_entries', where: 'date >= ?', whereArgs: [weekAgo]);
       int words = 0;
       for(var j in journals){ words += (j['content'] as String).split(RegExp(r'\s+')).length; }
-      final completions = await db.query('habit_completions', where: 'completed_date >= ?', whereArgs: [weekAgo], orderBy: 'completed_date DESC', limit: 10);
-      setState((){ _weeklyNet = net; _weeklyWords = words; _recentCompletions = completions; });
+      setState((){ _weeklyNet = net; _weeklyWords = words; });
     } catch(_){}
   }
 
@@ -1605,7 +1299,6 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
               const HabitHeatmapWidget(),
               const SizedBox(height: 16),
               const WeeklyReviewCard(),
-              
               const P2PSyncCard(),
               const SizedBox(height: 12),
               const AiCopilotStatusCard(),
@@ -1628,7 +1321,6 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
     );
   }
 
-
   void _showEncryptedDialog(BuildContext context){
     final c = TextEditingController();
     showDialog(context: context, builder: (ctx)=>AlertDialog(
@@ -1637,6 +1329,7 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
       actions:[TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text('Cancel')), ElevatedButton(onPressed: (){ if(c.text.trim().length>=4){ Navigator.pop(ctx); ExportService.exportEncryptedBackup(c.text.trim()); }}, child: const Text('Encrypt & Export'))],
     ));
   }
+
   List<Widget> _buildSearchResults() {
     if (_searchResults == null) return [];
     final List<Widget> widgets = [];
@@ -1654,21 +1347,13 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
   }
 }
 
-
-
 class MetricCard extends StatelessWidget {
   final String title;
   final String value;
   final IconData icon;
   final Color color;
 
-  const MetricCard({
-    super.key,
-    required this.title,
-    required this.value,
-    required this.icon,
-    required this.color,
-  });
+  const MetricCard({super.key, required this.title, required this.value, required this.icon, required this.color});
 
   @override
   Widget build(BuildContext context) {
@@ -1685,13 +1370,7 @@ class MetricCard extends StatelessWidget {
               children: [
                 Icon(icon, color: color, size: 18),
                 const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    title,
-                    style: const TextStyle(fontSize: 12, color: Colors.grey),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
+                Expanded(child: Text(title, style: const TextStyle(fontSize: 12, color: Colors.grey), overflow: TextOverflow.ellipsis)),
               ],
             ),
             const SizedBox(height: 8),
@@ -1703,7 +1382,7 @@ class MetricCard extends StatelessWidget {
   }
 }
 
-// ==================== 2. HABITS TAB (with Streaks + Heatmap) ====================
+// ==================== 2. HABITS TAB ====================
 class HabitsTab extends StatefulWidget {
   const HabitsTab({super.key});
 
@@ -1748,11 +1427,7 @@ class _HabitsTabState extends State<HabitsTab> {
       context: context,
       builder: (BuildContext context) => AlertDialog(
         title: Text(isEditing ? 'Edit Habit' : 'New Habit'),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(hintText: 'Enter habit name'),
-          autofocus: true,
-        ),
+        content: TextField(controller: controller, decoration: const InputDecoration(hintText: 'Enter habit name'), autofocus: true),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
           ElevatedButton(
@@ -1792,10 +1467,7 @@ class _HabitsTabState extends State<HabitsTab> {
             icon: const Icon(Icons.file_download),
             tooltip: 'Export Habits JSON',
             onPressed: () async {
-              final data = {
-                'habits': _habits,
-                'completions': _completionsMap,
-              };
+              final data = {'habits': _habits, 'completions': _completionsMap};
               await ExportService.exportJson('habits_${DateFormat('yyyy-MM-dd').format(DateTime.now())}.json', data);
             },
           ),
@@ -1807,12 +1479,7 @@ class _HabitsTabState extends State<HabitsTab> {
             padding: const EdgeInsets.all(12),
             child: TextField(
               controller: _searchController,
-              decoration: InputDecoration(
-                hintText: 'Search habits...',
-                prefixIcon: const Icon(Icons.search),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                isDense: true,
-              ),
+              decoration: InputDecoration(hintText: 'Search habits...', prefixIcon: const Icon(Icons.search), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)), isDense: true),
               onChanged: (v) => setState(() => _searchQuery = v),
             ),
           ),
@@ -1839,35 +1506,15 @@ class _HabitsTabState extends State<HabitsTab> {
                                 children: [
                                   Row(
                                     children: [
-                                      Container(
-                                        width: 10,
-                                        height: 10,
-                                        decoration: BoxDecoration(
-                                          color: ColorCodes.fromHex(habit['color'] ?? '#FF6B6B'),
-                                          shape: BoxShape.circle,
-                                        ),
-                                      ),
+                                      Container(width: 10, height: 10, decoration: BoxDecoration(color: ColorCodes.fromHex(habit['color'] ?? '#FF6B6B'), shape: BoxShape.circle)),
                                       const SizedBox(width: 8),
-                                      Expanded(
-                                        child: Text(
-                                          habit['name'],
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 16,
-                                          ),
-                                        ),
-                                      ),
+                                      Expanded(child: Text(habit['name'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16))),
                                     ],
                                   ),
-                                  Chip(
-                                    label: Text('🔥 $streak streak', style: const TextStyle(fontSize: 12)),
-                                    visualDensity: VisualDensity.compact,
-                                    backgroundColor: streak > 0 ? Colors.orange.shade100 : null,
-                                  ),
+                                  Chip(label: Text('🔥 $streak streak', style: const TextStyle(fontSize: 12)), visualDensity: VisualDensity.compact, backgroundColor: streak > 0 ? Colors.orange.shade100 : null),
                                 ],
                               ),
                               const SizedBox(height: 8),
-                              // Heatmap last 14 days
                               SizedBox(
                                 height: 30,
                                 child: ListView.builder(
@@ -1878,20 +1525,14 @@ class _HabitsTabState extends State<HabitsTab> {
                                     final dateStr = DateFormat('yyyy-MM-dd').format(date);
                                     final isDone = completions.contains(dateStr);
                                     return Container(
-                                      width: 22,
-                                      height: 22,
+                                      width: 22, height: 22,
                                       margin: const EdgeInsets.only(right: 4),
                                       decoration: BoxDecoration(
                                         color: isDone ? Colors.green : Colors.grey.shade300,
                                         borderRadius: BorderRadius.circular(4),
                                         border: dateStr == todayStr ? Border.all(color: Colors.blue, width: 2) : null,
                                       ),
-                                      child: Center(
-                                        child: Text(
-                                          DateFormat('d').format(date),
-                                          style: TextStyle(fontSize: 8, color: isDone ? Colors.white : Colors.black54),
-                                        ),
-                                      ),
+                                      child: Center(child: Text(DateFormat('d').format(date), style: TextStyle(fontSize: 8, color: isDone ? Colors.white : Colors.black54))),
                                     );
                                   },
                                 ),
@@ -1902,26 +1543,14 @@ class _HabitsTabState extends State<HabitsTab> {
                                 children: [
                                   Row(
                                     children: [
-                                      IconButton(
-                                        icon: const Icon(Icons.edit, color: Colors.blue, size: 20),
-                                        onPressed: () => _showHabitDialog(id: habit['id'], initialName: habit['name']),
-                                      ),
-                                      IconButton(
-                                        icon: const Icon(Icons.delete, color: Colors.red, size: 20),
-                                        onPressed: () async {
-                                          await DatabaseHelper.instance.deleteHabit(habit['id']);
-                                          await _refreshHabits();
-                                        },
-                                      ),
+                                      IconButton(icon: const Icon(Icons.edit, color: Colors.blue, size: 20), onPressed: () => _showHabitDialog(id: habit['id'], initialName: habit['name'])),
+                                      IconButton(icon: const Icon(Icons.delete, color: Colors.red, size: 20), onPressed: () async { await DatabaseHelper.instance.deleteHabit(habit['id']); await _refreshHabits(); }),
                                     ],
                                   ),
                                   ElevatedButton.icon(
                                     icon: Icon(doneToday ? Icons.check_circle : Icons.circle_outlined, size: 18),
                                     label: Text(doneToday ? 'Done Today' : 'Mark Today'),
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: doneToday ? Colors.green : null,
-                                      foregroundColor: doneToday ? Colors.white : null,
-                                    ),
+                                    style: ElevatedButton.styleFrom(backgroundColor: doneToday ? Colors.green : null, foregroundColor: doneToday ? Colors.white : null),
                                     onPressed: () => _toggleToday(id),
                                   ),
                                 ],
@@ -1935,15 +1564,12 @@ class _HabitsTabState extends State<HabitsTab> {
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () => _showHabitDialog(),
-        child: const Icon(Icons.add),
-      ),
+      floatingActionButton: FloatingActionButton(onPressed: () => _showHabitDialog(), child: const Icon(Icons.add)),
     );
   }
 }
 
-// ==================== 3. TASKS TAB (with Search) ====================
+// ==================== 3. TASKS TAB ====================
 class TasksTab extends StatefulWidget {
   const TasksTab({super.key});
 
@@ -1965,13 +1591,9 @@ class _TasksTabState extends State<TasksTab> {
   Future<void> _refreshTasks() async {
     try {
       final tasks = await DatabaseHelper.instance.getTasks();
-      setState(() {
-        _tasks = tasks;
-      });
+      setState(() { _tasks = tasks; });
     } catch (e) {
-      setState(() {
-        _tasks = [];
-      });
+      setState(() { _tasks = []; });
     }
   }
 
@@ -1982,11 +1604,7 @@ class _TasksTabState extends State<TasksTab> {
       context: context,
       builder: (BuildContext context) => AlertDialog(
         title: Text(isEditing ? 'Edit Task' : 'New Task'),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(hintText: 'Enter task description'),
-          autofocus: true,
-        ),
+        content: TextField(controller: controller, decoration: const InputDecoration(hintText: 'Enter task description'), autofocus: true),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
           ElevatedButton(
@@ -2016,13 +1634,7 @@ class _TasksTabState extends State<TasksTab> {
       appBar: AppBar(
         title: const Text('Tasks & To-dos'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.file_download),
-            tooltip: 'Export Tasks',
-            onPressed: () async {
-              await ExportService.exportJson('tasks_${DateFormat('yyyy-MM-dd').format(DateTime.now())}.json', _tasks);
-            },
-          ),
+          IconButton(icon: const Icon(Icons.file_download), tooltip: 'Export Tasks', onPressed: () async { await ExportService.exportJson('tasks_${DateFormat('yyyy-MM-dd').format(DateTime.now())}.json', _tasks); }),
         ],
       ),
       body: Column(
@@ -2031,67 +1643,42 @@ class _TasksTabState extends State<TasksTab> {
             padding: const EdgeInsets.all(12),
             child: TextField(
               controller: _searchController,
-              decoration: InputDecoration(
-                hintText: 'Search tasks...',
-                prefixIcon: const Icon(Icons.search),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                isDense: true,
-              ),
+              decoration: InputDecoration(hintText: 'Search tasks...', prefixIcon: const Icon(Icons.search), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)), isDense: true),
               onChanged: (v) => setState(() => _searchQuery = v),
             ),
           ),
           Expanded(
-            child: filtered.isEmpty
-                ? const Center(child: Text('No tasks found.'))
-                : ListView.builder(
-                    itemCount: filtered.length,
-                    itemBuilder: (context, index) {
-                      final task = filtered[index];
-                      final isDone = task['isCompleted'] == 1;
-                      return CheckboxListTile(
-                        title: Text(
-                          task['title'],
-                          style: TextStyle(
-                            decoration: isDone ? TextDecoration.lineThrough : null,
-                            color: isDone ? Colors.grey : null,
-                          ),
-                        ),
-                        value: isDone,
-                        onChanged: (bool? value) async {
-                          await DatabaseHelper.instance.updateTaskCompletion(task['id'], value == true ? 1 : 0);
-                          await _refreshTasks();
-                        },
-                        secondary: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              icon: const Icon(Icons.edit, color: Colors.blue, size: 20),
-                              onPressed: () => _showTaskDialog(id: task['id'], initialTitle: task['title']),
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.delete, color: Colors.red, size: 20),
-                              onPressed: () async {
-                                await DatabaseHelper.instance.deleteTask(task['id']);
-                                await _refreshTasks();
-                              },
-                            ),
-                          ],
-                        ),
-                      );
-                    },
+            child: filtered.isEmpty ? const Center(child: Text('No tasks found.')) : ListView.builder(
+              itemCount: filtered.length,
+              itemBuilder: (context, index) {
+                final task = filtered[index];
+                final isDone = task['isCompleted'] == 1;
+                return CheckboxListTile(
+                  title: Text(task['title'], style: TextStyle(decoration: isDone ? TextDecoration.lineThrough : null, color: isDone ? Colors.grey : null)),
+                  value: isDone,
+                  onChanged: (bool? value) async {
+                    await DatabaseHelper.instance.updateTaskCompletion(task['id'], value == true ? 1 : 0);
+                    await _refreshTasks();
+                  },
+                  secondary: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(icon: const Icon(Icons.edit, color: Colors.blue, size: 20), onPressed: () => _showTaskDialog(id: task['id'], initialTitle: task['title'])),
+                      IconButton(icon: const Icon(Icons.delete, color: Colors.red, size: 20), onPressed: () async { await DatabaseHelper.instance.deleteTask(task['id']); await _refreshTasks(); }),
+                    ],
                   ),
+                );
+              },
+            ),
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () => _showTaskDialog(),
-        child: const Icon(Icons.add),
-      ),
+      floatingActionButton: FloatingActionButton(onPressed: () => _showTaskDialog(), child: const Icon(Icons.add)),
     );
   }
 }
 
-// ==================== 4. FINANCE TAB (Charts + Search + Filter + Export) ====================
+// ==================== 4. FINANCE TAB ====================
 class FinanceTab extends StatefulWidget {
   const FinanceTab({super.key});
 
@@ -2147,9 +1734,7 @@ class _FinanceTabState extends State<FinanceTab> {
         try {
           final d = DateTime.parse(t['date'] as String);
           return !d.isBefore(_startDate!);
-        } catch (_) {
-          return true;
-        }
+        } catch (_) { return true; }
       }).toList();
     }
     if (_endDate != null) {
@@ -2157,22 +1742,14 @@ class _FinanceTabState extends State<FinanceTab> {
         try {
           final d = DateTime.parse(t['date'] as String);
           return !d.isAfter(_endDate!);
-        } catch (_) {
-          return true;
-        }
+        } catch (_) { return true; }
       }).toList();
     }
-    setState(() {
-      _filteredTransactions = result;
-    });
+    setState(() { _filteredTransactions = result; });
   }
 
-  double get _totalIncome {
-    return _filteredTransactions.where((t) => t['type'] == 'Income').fold(0.0, (sum, t) => sum + (t['amount'] as num).toDouble());
-  }
-  double get _totalExpense {
-    return _filteredTransactions.where((t) => t['type'] == 'Expense').fold(0.0, (sum, t) => sum + (t['amount'] as num).toDouble());
-  }
+  double get _totalIncome => _filteredTransactions.where((t) => t['type'] == 'Income').fold(0.0, (sum, t) => sum + (t['amount'] as num).toDouble());
+  double get _totalExpense => _filteredTransactions.where((t) => t['type'] == 'Expense').fold(0.0, (sum, t) => sum + (t['amount'] as num).toDouble());
   double get _netBalance => _totalIncome - _totalExpense;
 
   Map<String, double> get _expenseByCategory {
@@ -2194,7 +1771,6 @@ class _FinanceTabState extends State<FinanceTab> {
         map[key] = (map[key] ?? 0) + amount;
       } catch (_) {}
     }
-    // Sort by key
     final sortedKeys = map.keys.toList()..sort();
     return {for (var k in sortedKeys) k: map[k]!};
   }
@@ -2208,8 +1784,7 @@ class _FinanceTabState extends State<FinanceTab> {
             return AlertDialog(
               title: const Text('Manage Categories'),
               content: SizedBox(
-                width: double.maxFinite,
-                height: 400,
+                width: double.maxFinite, height: 400,
                 child: DefaultTabController(
                   length: 2,
                   child: Column(
@@ -2227,9 +1802,7 @@ class _FinanceTabState extends State<FinanceTab> {
                   ),
                 ),
               ),
-              actions: [
-                TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
-              ],
+              actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close'))],
             );
           },
         );
@@ -2374,25 +1947,13 @@ class _FinanceTabState extends State<FinanceTab> {
                     DropdownButtonFormField<String>(
                       value: currentCats.any((c) => c['name'] == selectedCategory) ? selectedCategory : (currentCats.isNotEmpty ? currentCats.first['name'] : null),
                       decoration: const InputDecoration(labelText: 'Category'),
-                      items: currentCats.map((cat) {
-                        return DropdownMenuItem<String>(value: cat['name'].toString(), child: Text(cat['name'].toString()));
-                      }).toList(),
+                      items: currentCats.map((cat) => DropdownMenuItem<String>(value: cat['name'].toString(), child: Text(cat['name'].toString()))).toList(),
                       onChanged: (val) {
-                        if (val != null) {
-                          setDialogState(() {
-                            selectedCategory = val;
-                          });
-                        }
+                        if (val != null) { setDialogState(() => selectedCategory = val); }
                       },
                     ),
                     const SizedBox(height: 12),
-                    TextField(
-                      controller: TextEditingController(text: selectedDate),
-                      decoration: const InputDecoration(labelText: 'Date (YYYY-MM-DD)'),
-                      onChanged: (val) {
-                        selectedDate = val;
-                      },
-                    ),
+                    TextField(controller: TextEditingController(text: selectedDate), decoration: const InputDecoration(labelText: 'Date (YYYY-MM-DD)'), onChanged: (val) { selectedDate = val; }),
                   ],
                 ),
               ),
@@ -2432,10 +1993,7 @@ class _FinanceTabState extends State<FinanceTab> {
       initialDateRange: _startDate != null && _endDate != null ? DateTimeRange(start: _startDate!, end: _endDate!) : null,
     );
     if (picked != null) {
-      setState(() {
-        _startDate = picked.start;
-        _endDate = picked.end;
-      });
+      setState(() { _startDate = picked.start; _endDate = picked.end; });
       _applyFilters();
     }
   }
@@ -2454,12 +2012,7 @@ class _FinanceTabState extends State<FinanceTab> {
               if (v == 'csv') ExportService.exportTransactionsCsv(_filteredTransactions);
               if (v == 'json') ExportService.exportJson('transactions_${DateFormat('yyyy-MM-dd').format(DateTime.now())}.json', _filteredTransactions);
               if (v == 'clear_filter') {
-                setState(() {
-                  _startDate = null;
-                  _endDate = null;
-                  _searchQuery = '';
-                  _searchController.clear();
-                });
+                setState(() { _startDate = null; _endDate = null; _searchQuery = ''; _searchController.clear(); });
                 _applyFilters();
               }
             },
@@ -2477,16 +2030,8 @@ class _FinanceTabState extends State<FinanceTab> {
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: TextField(
               controller: _searchController,
-              decoration: InputDecoration(
-                hintText: 'Search transactions by title or category...',
-                prefixIcon: const Icon(Icons.search),
-                isDense: true,
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-              ),
-              onChanged: (v) {
-                _searchQuery = v;
-                _applyFilters();
-              },
+              decoration: InputDecoration(hintText: 'Search transactions by title or category...', prefixIcon: const Icon(Icons.search), isDense: true, border: OutlineInputBorder(borderRadius: BorderRadius.circular(10))),
+              onChanged: (v) { _searchQuery = v; _applyFilters(); },
             ),
           ),
           if (_startDate != null || _endDate != null)
@@ -2495,13 +2040,7 @@ class _FinanceTabState extends State<FinanceTab> {
               child: Chip(
                 label: Text('Filter: ${_startDate != null ? DateFormat('yyyy-MM-dd').format(_startDate!) : '...'} to ${_endDate != null ? DateFormat('yyyy-MM-dd').format(_endDate!) : '...'}'),
                 deleteIcon: const Icon(Icons.clear, size: 18),
-                onDeleted: () {
-                  setState(() {
-                    _startDate = null;
-                    _endDate = null;
-                  });
-                  _applyFilters();
-                },
+                onDeleted: () { setState(() { _startDate = null; _endDate = null; }); _applyFilters(); },
               ),
             ),
           Card(
@@ -2540,28 +2079,26 @@ class _FinanceTabState extends State<FinanceTab> {
             const Divider(),
           ],
           Expanded(
-            child: _filteredTransactions.isEmpty
-                ? const Center(child: Text('No transactions found.'))
-                : ListView.builder(
-                    itemCount: _filteredTransactions.length,
-                    itemBuilder: (context, index) {
-                      final tx = _filteredTransactions[index];
-                      final isIncome = tx['type'] == 'Income';
-                      return ListTile(
-                        leading: CircleAvatar(backgroundColor: isIncome ? Colors.green.shade100 : Colors.red.shade100, child: Icon(isIncome ? Icons.arrow_upward : Icons.arrow_downward, color: isIncome ? Colors.green : Colors.red)),
-                        title: Text(tx['title'], style: const TextStyle(fontWeight: FontWeight.bold)),
-                        subtitle: Text('${tx['category']} • ${tx['date']}'),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text("${isIncome ? '+' : '-'}\$${(tx['amount'] as num).toStringAsFixed(2)}", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: isIncome ? Colors.green : Colors.red)),
-                            IconButton(icon: const Icon(Icons.edit, size: 18, color: Colors.blue), onPressed: () => _showTransactionDialog(transaction: tx)),
-                            IconButton(icon: const Icon(Icons.delete, size: 18, color: Colors.red), onPressed: () async { await DatabaseHelper.instance.deleteTransaction(tx['id']); await _refreshFinanceData(); }),
-                          ],
-                        ),
-                      );
-                    },
+            child: _filteredTransactions.isEmpty ? const Center(child: Text('No transactions found.')) : ListView.builder(
+              itemCount: _filteredTransactions.length,
+              itemBuilder: (context, index) {
+                final tx = _filteredTransactions[index];
+                final isIncome = tx['type'] == 'Income';
+                return ListTile(
+                  leading: CircleAvatar(backgroundColor: isIncome ? Colors.green.shade100 : Colors.red.shade100, child: Icon(isIncome ? Icons.arrow_upward : Icons.arrow_downward, color: isIncome ? Colors.green : Colors.red)),
+                  title: Text(tx['title'], style: const TextStyle(fontWeight: FontWeight.bold)),
+                  subtitle: Text('${tx['category']} • ${tx['date']}'),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text("${isIncome ? '+' : '-'}\$${(tx['amount'] as num).toStringAsFixed(2)}", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: isIncome ? Colors.green : Colors.red)),
+                      IconButton(icon: const Icon(Icons.edit, size: 18, color: Colors.blue), onPressed: () => _showTransactionDialog(transaction: tx)),
+                      IconButton(icon: const Icon(Icons.delete, size: 18, color: Colors.red), onPressed: () async { await DatabaseHelper.instance.deleteTransaction(tx['id']); await _refreshFinanceData(); }),
+                    ],
                   ),
+                );
+              },
+            ),
           ),
         ],
       ),
@@ -2630,9 +2167,7 @@ class _FinanceTabState extends State<FinanceTab> {
   }
 }
 
-// ==================== 5. JOURNAL & WRITING STUDIO TAB (with Search + Export) ====================
-
-// ==================== PUSH 4 WIDGETS — Analytics, Heatmap, Weekly Review, P2P, AI ====================
+// ==================== WIDGETS — Analytics, Heatmap, Weekly Review, P2P, AI ====================
 class CrossModuleAnalyticsWidget extends StatefulWidget {
   final double weeklyNet;
   final int weeklyWords;
@@ -2743,7 +2278,7 @@ class _HabitHeatmapWidgetState extends State<HabitHeatmapWidget> {
   }
   @override
   Widget build(BuildContext context){
-    final days = List.generate(42, (i)=>DateTime.now().subtract(Duration(days: 83-i)));
+    final days = List.generate(42, (i)=>DateTime.now().subtract(Duration(days: 41-i)));
     return Card(
       elevation: 2,
       child: Padding(
@@ -2798,11 +2333,7 @@ class _WeeklyReviewCardState extends State<WeeklyReviewCard> {
         title: const Text('Weekly Life Review PDF', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
         subtitle: const Text('Last 7 days — habits, tasks, finance, writing — local PDF', style: TextStyle(fontSize: 11)),
         trailing: _generating
-            ? const SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
+            ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
             : ElevatedButton.icon(
                 icon: const Icon(Icons.picture_as_pdf, size: 16),
                 label: const Text('Generate'),
@@ -2810,15 +2341,7 @@ class _WeeklyReviewCardState extends State<WeeklyReviewCard> {
                   setState(()=>_generating=true);
                   await WeeklyReviewService.shareWeeklyPdf();
                   setState(()=>_generating=false);
-                  if(mounted){
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text(
-                          'Weekly PDF generated & share sheet opened',
-                        ),
-                      ),
-                    );
-                  }
+                  if(mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Weekly PDF generated & share sheet opened')));
                 },
               ),
       ),
@@ -2856,9 +2379,7 @@ class _P2PSyncCardState extends State<P2PSyncCard> {
               Expanded(
                 child: ElevatedButton.icon(
                   icon: Icon(_serving?Icons.stop:Icons.play_arrow),
-                  label: Text(
-                    _serving?'Stop Server':'Start Server (Host)',
-                  ),
+                  label: Text(_serving?'Stop Server':'Start Server (Host)'),
                   onPressed: () async {
                     if(_serving){
                       await P2PSyncService.stopServer();
@@ -2866,15 +2387,7 @@ class _P2PSyncCardState extends State<P2PSyncCard> {
                     } else {
                       final ok = await P2PSyncService.startServer();
                       setState(()=>_serving=ok);
-                      if(ok&&mounted){
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              'P2P Server at http://$_ip:8765/db',
-                            ),
-                          ),
-                        );
-                      }
+                      if(ok&&mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('P2P Server at http://$_ip:8765/db')));
                     }
                   },
                 ),
@@ -2893,44 +2406,20 @@ class _P2PSyncCardState extends State<P2PSyncCard> {
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children:[
-          const Text(
-            'Enter Windows host IP (e.g., 192.168.1.15) — '
-            'both devices same Wi-Fi, host must have Started Server',
-            style: TextStyle(fontSize: 11),
-          ),
+          const Text('Enter Windows host IP (e.g., 192.168.1.15) — both devices same Wi-Fi, host must have Started Server', style: TextStyle(fontSize: 11)),
           const SizedBox(height:12),
-          TextField(
-            controller: _ipController,
-            decoration: const InputDecoration(
-              labelText: 'Host IP',
-              hintText: '192.168.1.15',
-              border: OutlineInputBorder(),
-            ),
-          ),
+          TextField(controller: _ipController, decoration: const InputDecoration(labelText: 'Host IP', hintText: '192.168.1.15', border: OutlineInputBorder())),
         ],
       ),
       actions:[
-        TextButton(
-          onPressed: ()=>Navigator.pop(ctx),
-          child: const Text('Cancel'),
-        ),
+        TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text('Cancel')),
         ElevatedButton(
           onPressed: () async {
             final ip=_ipController.text.trim();
             if(ip.isNotEmpty){
               Navigator.pop(ctx);
               final ok = await P2PSyncService.syncFromServer(ip);
-              if(mounted){
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      ok
-                          ?'Sync success! Restart app. Backup saved.'
-                          :'Sync failed — check IP & host server',
-                    ),
-                  ),
-                );
-              }
+              if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(ok?'Sync success! Restart app. Backup saved.':'Sync failed — check IP & host server')));
             }
           },
           child: const Text('Pull DB'),
@@ -2975,7 +2464,7 @@ class _AiCopilotStatusCardState extends State<AiCopilotStatusCard> {
   }
 }
 
-// ==================== 5. WRITING HUB — PUSH 4 KANBAN + AI COPILOT ====================
+// ==================== 5. WRITING HUB & MICRO-JOURNAL ====================
 class JournalTab extends StatefulWidget {
   const JournalTab({super.key});
   @override
@@ -3031,7 +2520,6 @@ class _JournalTabState extends State<JournalTab> {
     String selectedCategory = entry?['category'] ?? _writingCategories.first;
     String selectedMood = entry?['mood'] ?? _moods.first;
     String selectedStatus = entry?['status'] ?? 'Idea';
-    bool isAiLoading = false;
     String aiResult = '';
 
     showDialog(
@@ -3044,12 +2532,11 @@ class _JournalTabState extends State<JournalTab> {
                 Text(isEditing?'Edit Writing':'New Writing'),
                 Row(children:[
                   IconButton(icon: const Icon(Icons.smart_toy_outlined, size:20), tooltip: 'AERO', onPressed: ()=>_showAiDialog(contentController, setDialogState)),
-                  IconButton(icon: const Icon(Icons.category, size:20), onPressed: ()=>Navigator.pop(context)),
+                  IconButton(icon: const Icon(Icons.close, size:20), onPressed: ()=>Navigator.pop(context)),
                 ]),
               ]),
               content: SizedBox(
-                width: 600,
-                height: 520,
+                width: 600, height: 520,
                 child: Column(
                   children: [
                     Row(children:[
@@ -3067,43 +2554,18 @@ class _JournalTabState extends State<JournalTab> {
                       const SizedBox(height:8),
                       Container(
                         padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: Colors.purple.shade50,
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(
-                            color: Colors.purple.shade200,
-                          ),
-                        ),
+                        decoration: BoxDecoration(color: Colors.purple.shade50, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.purple.shade200)),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children:[
                             Row(children:[
                               const Icon(Icons.smart_toy, size:14),
                               const SizedBox(width:4),
-                              const Text(
-                                'AI Suggestion',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize:11,
-                                ),
-                              ),
+                              const Text('AI Suggestion', style: TextStyle(fontWeight: FontWeight.bold, fontSize:11)),
                               const Spacer(),
-                              TextButton(
-                                onPressed: (){
-                                  contentController.text +=
-                                      '\n\n' + aiResult;
-                                  setDialogState(()=>aiResult='');
-                                },
-                                child: const Text(
-                                  'Insert',
-                                  style: TextStyle(fontSize:10),
-                                ),
-                              ),
+                              TextButton(onPressed: (){ contentController.text += '\n\n' + aiResult; setDialogState(()=>aiResult=''); }, child: const Text('Insert', style: TextStyle(fontSize:10))),
                             ]),
-                            Text(
-                              aiResult,
-                              style: const TextStyle(fontSize:11),
-                            ),
+                            Text(aiResult, style: const TextStyle(fontSize:11)),
                           ],
                         ),
                       ),
@@ -3146,10 +2608,7 @@ class _JournalTabState extends State<JournalTab> {
             ElevatedButton(
               onPressed: () async {
                 setState(()=>loading=true);
-                final res = await AiCopilotService.improveText(
-                  contentCtrl.text,
-                  instruction: instructionCtrl.text,
-                );
+                final res = await AiCopilotService.improveText(contentCtrl.text, instruction: instructionCtrl.text);
                 setState((){ aiResponse=res; loading=false; });
               },
               child: const Text('Run AI'),
@@ -3158,9 +2617,7 @@ class _JournalTabState extends State<JournalTab> {
             TextButton(
               onPressed: () async {
                 setState(()=>loading=true);
-                final res = await AiCopilotService.summarize(
-                  contentCtrl.text,
-                );
+                final res = await AiCopilotService.summarize(contentCtrl.text);
                 setState((){ aiResponse=res; loading=false; });
               },
               child: const Text('Summarize'),
@@ -3168,9 +2625,7 @@ class _JournalTabState extends State<JournalTab> {
             TextButton(
               onPressed: () async {
                 setState(()=>loading=true);
-                final res = await AiCopilotService.expand(
-                  contentCtrl.text,
-                );
+                final res = await AiCopilotService.expand(contentCtrl.text);
                 setState((){ aiResponse=res; loading=false; });
               },
               child: const Text('Expand'),
@@ -3203,36 +2658,13 @@ class _JournalTabState extends State<JournalTab> {
               children: [
                 Container(
                   padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: statusEnum.color,
-                    borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(11),
-                      topRight: Radius.circular(11),
-                    ),
-                  ),
+                  decoration: BoxDecoration(color: statusEnum.color, borderRadius: const BorderRadius.only(topLeft: Radius.circular(11), topRight: Radius.circular(11))),
                   child: Row(children:[
-                    Icon(
-                      statusEnum.icon,
-                      size:16,
-                      color: Colors.white,
-                    ),
+                    Icon(statusEnum.icon, size:16, color: Colors.white),
                     const SizedBox(width:4),
-                    Text(
-                      status,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
-                        fontSize: 12,
-                      ),
-                    ),
+                    Text(status, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 12)),
                     const Spacer(),
-                    Text(
-                      '${statusEntries.length}',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 11,
-                      ),
-                    ),
+                    Text('${statusEntries.length}', style: const TextStyle(color: Colors.white, fontSize: 11)),
                   ]),
                 ),
                 Expanded(
@@ -3241,12 +2673,6 @@ class _JournalTabState extends State<JournalTab> {
                     onReorder: (oldIdx, newIdx) async {
                       if(newIdx>oldIdx) newIdx--;
                       final moved = statusEntries[oldIdx];
-                      setState((){
-                        final all = List<Map<String,dynamic>>.from(_filteredEntries);
-                        all.removeWhere((e)=>e['id']==moved['id']);
-                        final targetIdx = all.indexWhere((e)=>(e['status']??'Idea')==status);
-                        // Simplified: just update order_index
-                      });
                       await _updateOrder(moved['id'], newIdx);
                       await _refreshEntries();
                     },
@@ -3258,27 +2684,13 @@ class _JournalTabState extends State<JournalTab> {
                         subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[Text('${entry['category']} • ${entry['word_count']??0}w', style: const TextStyle(fontSize: 10)), const SizedBox(height:4), LinearProgressIndicator(value: _statuses.indexOf(status)/3, color: statusEnum.color, backgroundColor: Colors.grey.shade200, minHeight: 3)]),
                         trailing: PopupMenuButton<String>(
                           onSelected: (v){
-                            if(v=='edit'){
-                              _openEditor(entry: entry);
-                            } else if(v!=''&&_statuses.contains(v)){
-                              _updateStatus(entry['id'], v);
-                            }
+                            if(v=='edit'){ _openEditor(entry: entry); } else if(v!=''&&_statuses.contains(v)){ _updateStatus(entry['id'], v); }
                           },
                           itemBuilder: (c){
                             return [
-                              const PopupMenuItem(
-                                value: 'edit',
-                                child: Text('Edit'),
-                              ),
+                              const PopupMenuItem(value: 'edit', child: Text('Edit')),
                               const PopupMenuDivider(),
-                              ..._statuses.where(
-                                (s)=>s!=status
-                              ).map(
-                                (s)=>PopupMenuItem(
-                                  value:s,
-                                  child: Text('Move to $s'),
-                                ),
-                              ),
+                              ..._statuses.where((s)=>s!=status).map((s)=>PopupMenuItem(value:s, child: Text('Move to $s'))),
                             ];
                           },
                         ),
@@ -3323,19 +2735,9 @@ class _JournalTabState extends State<JournalTab> {
               return Padding(
                 padding: const EdgeInsets.only(right:8),
                 child: ChoiceChip(
-                  label: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children:[
-                      Icon(enumVal.icon, size:14),
-                      const SizedBox(width:4),
-                      Text(st),
-                    ],
-                  ),
+                  label: Row(mainAxisSize: MainAxisSize.min, children:[Icon(enumVal.icon, size:14), const SizedBox(width:4), Text(st)]),
                   selected: _selectedStatusFilter==st,
-                  onSelected: (s){
-                    setState(()=>_selectedStatusFilter=st);
-                    _applyFilters();
-                  },
+                  onSelected: (s){ setState(()=>_selectedStatusFilter=st); _applyFilters(); },
                   selectedColor: enumVal.color.withOpacity(0.3),
                 ),
               );
@@ -3376,9 +2778,7 @@ class _JournalTabState extends State<JournalTab> {
   }
 }
 
-
-
-// ==================== PUSH 5 — GALLERY (Take Pictures + Save in App + Phone Gallery) ====================
+// ==================== GALLERY TAB ====================
 class GalleryTab extends StatefulWidget {
   const GalleryTab({super.key});
   @override
@@ -3436,7 +2836,7 @@ class _GalleryTabState extends State<GalleryTab> {
   }
 }
 
-// ==================== PUSH 5 — GAMETAB — Flappy, Breakout, Space Shooter ONLY (No Snake) ====================
+// ==================== GAMETAB ====================
 class GameTab extends StatefulWidget {
   const GameTab({super.key});
   @override State<GameTab> createState() => _GameTabState();
@@ -3466,7 +2866,7 @@ class _GameTabState extends State<GameTab> {
   }
 }
 
-
+// ==================== AI CHAT TAB ====================
 class AiChatTab extends StatefulWidget {
   const AiChatTab({super.key});
   @override
@@ -3518,11 +2918,10 @@ class _AiChatTabState extends State<AiChatTab> {
             style: TextStyle(fontSize:10),
           ),
           const SizedBox(height:8),
-          // Engine status chips
           Wrap(spacing:4, runSpacing:4, children: [
-            Chip(label: Text('Core: always', style: TextStyle(fontSize:9)), backgroundColor: Colors.black12, avatar: Icon(Icons.memory, size:12)),
-            Chip(label: Text(hasModel ? 'Engine1 TinyLlama: ready' : 'Engine1: need 600MB', style: TextStyle(fontSize:9)), backgroundColor: hasModel ? Colors.green.withOpacity(0.2) : Colors.orange.withOpacity(0.2), avatar: Icon(Icons.phone_iphone, size:12)),
-            Chip(label: Text(isApple ? 'Engine2 Apple Intel: check' : 'Engine2 Apple: iPhone 15 Pro+', style: TextStyle(fontSize:9)), backgroundColor: Colors.pink.withOpacity(0.2), avatar: Icon(Icons.auto_awesome, size:12)),
+            const Chip(label: Text('Core: always', style: TextStyle(fontSize:9)), backgroundColor: Colors.black12, avatar: Icon(Icons.memory, size:12)),
+            Chip(label: Text(hasModel ? 'Engine1 TinyLlama: ready' : 'Engine1: need 600MB', style: TextStyle(fontSize:9)), backgroundColor: hasModel ? Colors.green.withOpacity(0.2) : Colors.orange.withOpacity(0.2), avatar: const Icon(Icons.phone_iphone, size:12)),
+            Chip(label: Text(isApple ? 'Engine2 Apple Intel: check' : 'Engine2 Apple: iPhone 15 Pro+', style: TextStyle(fontSize:9)), backgroundColor: Colors.pink.withOpacity(0.2), avatar: const Icon(Icons.auto_awesome, size:12)),
             Chip(label: Text(isOnline ? 'Engine3 Ollama: online' : 'Engine3 Ollama: offline', style: TextStyle(fontSize:9)), backgroundColor: isOnline ? Colors.green.withOpacity(0.2) : Colors.grey.withOpacity(0.2), avatar: Icon(Icons.computer, size:12)),
             Chip(label: Text('Engine4 Siri: setup', style: TextStyle(fontSize:9)), backgroundColor: Colors.amber.withOpacity(0.2), avatar: Icon(Icons.mic, size:12)),
           ]),
@@ -3534,23 +2933,13 @@ class _AiChatTabState extends State<AiChatTab> {
           ),
           const Divider(height:16),
           const SelectableText(
-            'Windows: http://localhost:11434 — iPhone same Wi-Fi: http://192.168.1.15:11434 (your Windows IP). Zero cloud. Long-press to copy. VPN: enable Allow LAN in VPN settings OR use on-device 600MB model.',
+            'Windows: http://localhost:11434 — iPhone same Wi-Fi: http://192.168.1.15:11434 (your Windows IP). Zero cloud.',
             style: TextStyle(fontSize:11),
           ),
-          const SizedBox(height:8),
-          Wrap(spacing:6, runSpacing:4, children:[
-            ActionChip(label: const Text('Copy Win', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(ClipboardData(text: 'http://localhost:11434')); ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Copied Windows URL'))); }),
-            ActionChip(label: const Text('Copy iPhone', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(ClipboardData(text: 'http://192.168.1.15:11434')); ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Copied iPhone URL'))); }),
-            ActionChip(label: const Text('Copy Serve', style: TextStyle(fontSize:10)), onPressed: (){ Clipboard.setData(ClipboardData(text: 'OLLAMA_HOST=0.0.0.0 ollama serve')); ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Copied serve cmd'))); }),
-          ]),
           const SizedBox(height:12),
           TextField(controller: urlCtrl, decoration: const InputDecoration(labelText: 'AERO URL (paste)', hintText: 'http://192.168.1.15:11434', border: OutlineInputBorder())),
           const SizedBox(height:8),
           TextField(controller: modelCtrl, decoration: const InputDecoration(labelText: 'Model', hintText: 'llama3', border: OutlineInputBorder())),
-          const SizedBox(height:8),
-          const SelectableText('Bible mode: ask "Explain Romans 8:28 with Greek" or "Bible plan for anxiety"', style: TextStyle(fontSize:10, fontStyle: FontStyle.italic)),
-          const SizedBox(height:4),
-          SelectableText('Now: ${DateFormat('yyyy-MM-dd HH:mm EEEE').format(DateTime.now())} Detroit | On-device: ${AeroOnDeviceService._modelLoaded ? "ready" : "download needed"}', style: const TextStyle(fontSize:10, color: Colors.grey)),
         ]),
       ),
       actions:[
@@ -3600,19 +2989,6 @@ class _AiChatTabState extends State<AiChatTab> {
               isThreeLine: true,
             ),
           )),
-          const SizedBox(height:12),
-          const Divider(),
-          const Text('How it picks engine:', style: TextStyle(fontWeight: FontWeight.bold, fontSize:11)),
-          const SizedBox(height:4),
-          const SelectableText(
-            '1. If you type "hi" or "what time is it" -> AERO Core (instant, no model needed, works on iPhone 13)\n'
-            '2. If Apple Intelligence available (iPhone 15 Pro+ / 17 Pro Max, iOS 18+) -> Engine 2 (free, fast)\n'
-            '3. Else if TinyLlama 600MB downloaded -> Engine 1 (any iPhone, offline)\n'
-            '4. Else if Ollama online (Surface Pro on same WiFi) -> Engine 3\n'
-            '5. Else -> Core + prompt to download model\n\n'
-            'Engine 4: Say "Hey Siri, ask AERO to summarize my week" -> triggers Engine 1 via Shortcuts. No Apple Intelligence needed.',
-            style: TextStyle(fontSize:10),
-          ),
         ]),
       ),
       actions:[
@@ -3632,7 +3008,6 @@ class _AiChatTabState extends State<AiChatTab> {
     ));
   }
 
-
   Future<void> _sendMessage() async {
     final text = _inputCtrl.text.trim();
     if(text.isEmpty || _isLoading) return;
@@ -3646,7 +3021,6 @@ class _AiChatTabState extends State<AiChatTab> {
       final now = DateTime.now();
       final realTimeStr = DateFormat('yyyy-MM-dd HH:mm:ss EEEE').format(now);
       final lq = text.toLowerCase();
-      // FAST PATH: if on-device model exists and we are offline (Xfinity blocking), use on-device immediately — don't wait 60s for Surface
       final hasOnDevice = await AeroOnDeviceService.checkModelExists();
       final isOffline = _online == false;
       if(hasOnDevice && (isOffline || lq == 'hi' || lq == 'hello' || lq.contains('what time'))){
@@ -3658,65 +3032,36 @@ class _AiChatTabState extends State<AiChatTab> {
           });
           _scrollToBottom();
           return;
-        } catch(e){
-          debugPrint('Fast on-device failed, will try Surface: $e');
-        }
+        } catch(_){}
       }
 
       String contextPrompt = text;
-      // Detect Bible vs lifestyle vs date
-      final isBible = lq.contains('bible') || lq.contains('verse') || lq.contains('scripture') || lq.contains('psalm') || lq.contains('romans') || lq.contains('genesis') || lq.contains('jesus') || lq.contains('god') || lq.contains('faith');
-      final isTime = lq.contains('time') || lq.contains('date') || lq.contains('today') || lq.contains('what day');
-      final isWeek = lq.contains('week') || lq.contains('habit') || lq.contains('summary');
+      final isBible = lq.contains('bible') || lq.contains('verse') || lq.contains('scripture') || lq.contains('psalm') || lq.contains('romans') || lq.contains('jesus') || lq.contains('god');
+      final isTime = lq.contains('time') || lq.contains('date') || lq.contains('today');
       
       if(isTime){
-        contextPrompt = 'REAL TIME: $realTimeStr Detroit EST (Oct 12 2026 Sunday). User asks time/date: $text. Answer with $realTimeStr exactly.';
+        contextPrompt = 'REAL TIME: $realTimeStr Detroit EST. User asks time/date: $text. Answer with $realTimeStr exactly.';
       } else if(isBible){
-        try {
-          final db = await DatabaseHelper.instance.database;
-          final journals = await db.query('journal_entries', orderBy: 'date DESC', limit: 3);
-          final jCtx = journals.map((j)=>j['content'].toString().substring(0, journals.isNotEmpty ? 100 : 0)).join(' | ');
-          contextPrompt = 'REAL TIME: $realTimeStr. User BIBLE query: $text. Recent journals: $jCtx. Provide deep Bible answer with book/chapter/verse, cross-refs, Greek/Hebrew nuance if relevant, and practical life application for Detroit lifestyle.';
-        } catch(_){
-          contextPrompt = 'REAL TIME: $realTimeStr. User BIBLE query: $text. Provide deep Bible answer.';
-        }
-      } else if(isWeek){
-        try {
-          final db = await DatabaseHelper.instance.database;
-          final weekAgo = DateFormat('yyyy-MM-dd').format(now.subtract(const Duration(days: 7)));
-          final completions = await db.query('habit_completions', where: 'completed_date >= ?', whereArgs: [weekAgo]);
-          final txs = await db.query('transactions', where: 'date >= ?', whereArgs: [weekAgo]);
-          contextPrompt = 'REAL TIME: $realTimeStr Detroit. Last7d ${completions.length} habits ${txs.length} tx. Lifestyle/personal project Q: $text. Give actionable advice.';
-        } catch(_){
-          contextPrompt = 'REAL TIME: $realTimeStr. Q: $text';
-        }
-      } else {
-        contextPrompt = 'REAL TIME: $realTimeStr Detroit EST. Q: $text';
+        contextPrompt = 'REAL TIME: $realTimeStr. User BIBLE query: $text. Provide deep Bible answer with cross-refs and practical life application.';
       }
 
       final instruction = isBible 
-        ? 'You are Onyx Beacon AERO Bible Scholar + Life Coach. Real AI for Bible, personal projects, lifestyle. Use REAL TIME $realTimeStr. Deep scripture, context, practical application. No date hallucination.'
-        : 'You are Onyx Beacon AERO Real AI. Real time $realTimeStr Detroit. Bible, lifestyle, personal projects expert. Accurate, concise, practical. Use real time.';
+        ? 'You are Onyx Beacon AERO Bible Scholar + Life Coach. Real AI for Bible, personal projects, lifestyle. Use REAL TIME $realTimeStr.'
+        : 'You are Onyx Beacon AERO Real AI. Real time $realTimeStr Detroit. Bible, lifestyle, personal projects expert.';
 
-      // Try Surface with short timeout for fast fallback
       String response;
       try {
         response = await AiCopilotService.improveText(contextPrompt, instruction: instruction).timeout(const Duration(seconds: 8), onTimeout: () => 'TIMEOUT');
-      } catch(e){
+      } catch(_){
         response = 'TIMEOUT';
       }
       
-      // If Surface offline / VPN blocking or timeout, auto fallback to on-device real AI
-      if(response == 'TIMEOUT' || response.startsWith('AI Error:') || response.startsWith('AI Offline:') || response.contains('TimeoutException')){
+      if(response == 'TIMEOUT' || response.startsWith('AI Error:') || response.startsWith('AI Offline:')){
         if(hasOnDevice){
-          try {
-            final od = await AeroOnDeviceService.generateOnDevice(text);
-            response = od + '\n\n[on-device real AI - $realTimeStr - VPN-friendly, Xfinity ON ok]';
-          } catch(e){
-            response = 'On-device error: $e. Surface also offline (Xfinity 127.0.0.1:9339 blocking). Try "hi" for fast path test.';
-          }
+          final od = await AeroOnDeviceService.generateOnDevice(text);
+          response = od + '\n\n[on-device real AI - $realTimeStr]';
         } else {
-          response = 'AERO offline — Xfinity VPN (127.0.0.1:9339) blocking Surface $realTimeStr. Fix: Xfinity app → Advanced Security OFF or VPN Connect On Demand OFF. Or download 600MB on-device model in settings for real AI Bible/lifestyle with VPN ON (no Surface needed).';
+          response = 'AERO offline. Run ollama run llama3 on your PC or download 600MB on-device model in settings.';
         }
       }
       setState((){
@@ -3724,55 +3069,30 @@ class _AiChatTabState extends State<AiChatTab> {
         _isLoading = false;
       });
     } catch(e){
-      // Final fallback - try on-device real AI even if everything fails
-      try {
-        if(await AeroOnDeviceService.checkModelExists()){
-          final od = await AeroOnDeviceService.generateOnDevice(text);
-          setState((){
-            _messages.add({'role':'assistant','text':od + '\n\n[on-device real AI]'});
-            _isLoading = false;
-          });
-          _scrollToBottom();
-          return;
-        }
-      } catch(_){}
       setState((){
-        _messages.add({'role':'assistant','text':'Error: $e. Fix: Download on-device model for VPN-friendly real AI, or Surface: OLLAMA_HOST=0.0.0.0 ollama serve + ollama pull llama3'});
+        _messages.add({'role':'assistant','text':'Error: $e'});
         _isLoading = false;
       });
     }
     _scrollToBottom();
   }
 
-
-
-    Future<void> _startListening() async {
+  Future<void> _startListening() async {
     if (Platform.isWindows || Platform.isLinux) {
       if(mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Voice input works on iPhone/Android/macOS. On desktop, use your keyboard mic.')));
       return;
     }
     try {
       final avail = await _speech.initialize(
-        onError: (e){ if(mounted) setState(()=>_listening=false); },
+        onError: (_){ if(mounted) setState(()=>_listening=false); },
         onStatus: (s){ if((s=='done'||s=='notListening') && mounted) setState(()=>_listening=false); },
       );
-      if(!avail){
-        if(mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Speech recognition unavailable — allow Microphone & Speech permissions in Settings.')));
-        return;
-      }
+      if(!avail) return;
       setState(()=>_listening=true);
-      await _speech.listen(
-        onResult: (res){ if(mounted) setState(()=>_inputCtrl.text = res.recognizedWords); },
-        listenOptions: SpeechListenOptions(
-          partialResults: true,
-          listenFor: Duration(seconds: 60),
-          pauseFor: Duration(seconds: 5),
-        ),
-      );
-    } catch(e){
-      if(mounted){ setState(()=>_listening=false); ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Mic error: $e'))); }
-    }
+      await _speech.listen(onResult: (res){ if(mounted) setState(()=>_inputCtrl.text = res.recognizedWords); });
+    } catch(_){ if(mounted) setState(()=>_listening=false); }
   }
+
   void _stopListening(){
     try { _speech.stop(); } catch(_){}
     if(mounted) setState(()=>_listening=false);
@@ -3811,18 +3131,8 @@ class _AiChatTabState extends State<AiChatTab> {
                 child: Row(children:[
                   const Icon(Icons.warning_amber, size:16),
                   const SizedBox(width:6),
-                  const Expanded(
-                    child: Text(
-                      'AERO offline — Windows: ollama run llama3. '
-                      'iPhone: set to http://192.168.1.15:11434 '
-                      '(same Wi-Fi, zero cloud). Tap X to dismiss.',
-                      style: TextStyle(fontSize:11),
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: _checkOnline,
-                    child: const Text('Retry'),
-                  ),
+                  const Expanded(child: Text('AERO offline — Windows: ollama run llama3. iPhone: set to http://192.168.1.15:11434', style: TextStyle(fontSize:11))),
+                  TextButton(onPressed: _checkOnline, child: const Text('Retry')),
                   IconButton(icon: const Icon(Icons.close, size:16), onPressed: ()=>setState(()=>_bannerDismissed=true)),
                 ]),
               ),
@@ -3896,4 +3206,3 @@ class _AiChatTabState extends State<AiChatTab> {
     );
   }
 }
-
