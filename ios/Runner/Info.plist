@@ -36,6 +36,8 @@
 	<string>Save pictures to Onyx gallery - store camera photos in app vault</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Onyx Beacon uses speech to text for AERO chat - local on-device transcription, zero cloud</string>
+	<key>NSAppleIntelligenceUsageDescription</key>
+	<string>Onyx Beacon uses Apple Intelligence for on-device AI chat - free, private, zero cloud</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

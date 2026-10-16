@@ -16,10 +16,10 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.0+9
+version: 1.0.0+10
 
 environment:
-  sdk: '>=3.5.0 <4.0.0'
+  sdk: ^3.13.5
 
 # Dependencies specify other packages that your package needs in order to work.
 # To automatically upgrade your package dependencies to the latest versions
@@ -30,14 +30,13 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  sqflite: ^2.4.4+2
-  sqflite_common_ffi: ^2.4.4
-  sqflite_common: ^2.5.14
-  path: ^1.9.1
-  
-  # The following adds the Cupertino Icons font to your application.
+    # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^2.0.0
+  path: ^1.9.1
+  sqflite: ^2.4.4+2
+  sqflite_common_ffi: ^2.4.4
+  sqflite_common: ^2.5.14  
   fl_chart: ^1.2.0
   path_provider: ^2.1.5
   share_plus: ^12.0.2
@@ -54,6 +53,7 @@ dependencies:
   http: ^1.2.2
   pdf: ^3.11.1
   printing: ^5.12.0
+  device_info_plus: ^11.3.0
   # PUSH 5 — Mic + Gallery + Games (Flappy, Breakout, Shooter) — Windows + iPhone IPA validated
   image_picker: ^1.1.2
   speech_to_text: ^7.5.0
@@ -65,6 +65,14 @@ dependencies:
     git:
       url: https://github.com/Telosnex/fllama.git
       ref: main
+
+# Fix fllama prebuilt mismatch on git main - force source build
+# This makes Windows build from source (requires CMake, takes ~5-16min first time)
+# For iPhone 13 / 17 Pro Max, Xcode builds llama.cpp natively - AI will work
+hooks:
+  user_defines:
+    fllama:
+      native_build: source
 
 dev_dependencies:
   flutter_test:
