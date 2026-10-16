@@ -28,6 +28,8 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Onyx Beacon camera for gallery - take pictures inside app for offline vault</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>AERO can use a computer on your Wi-Fi (Ollama) for bigger AI answers when one is available.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Onyx Beacon needs mic for voice input for AERO chat and journal - local speech to text</string>
 	<key>NSPhotoLibraryUsageDescription</key>

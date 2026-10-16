@@ -64,12 +64,15 @@ class AeroAppleAIPlugin: NSObject, FlutterPlugin {
         result(FlutterError(code: "UNAVAILABLE", message: current, details: nil))
         return
       }
-      // Instructions are folded into the prompt so this compiles against every iOS 26 SDK revision.
-      let fullPrompt = instructions.isEmpty ? prompt : "\(instructions)\n\nUser: \(prompt)"
+      // A fresh session per message: the Dart side sends the recent conversation inside `prompt`,
+      // which keeps every request well under the model's 4,096-token window.
+      // Instructions go in Apple's real instructions slot so the model actually takes on AERO's role.
       Task {
         do {
-          let session = LanguageModelSession()
-          let response = try await session.respond(to: fullPrompt)
+          let session = instructions.isEmpty
+            ? LanguageModelSession()
+            : LanguageModelSession(instructions: instructions)
+          let response = try await session.respond(to: prompt)
           let text = response.content
           DispatchQueue.main.async { result(text) }
         } catch {

@@ -6,6 +6,17 @@
 
 ---
 
+## PUSH 5.4 — AERO becomes a personal assistant (current state)
+
+- **Personalized, not hardcoded:** name / city / "about you" set in AERO → 👤. Used by AERO's prompt, greetings and the dashboard. No more hardcoded name, city or Bible branding; scripture is handled when asked, like any topic.
+- **Conversation memory:** last 8 messages (~2,400 chars) go to every engine. Apple Intelligence gets a fresh session per message with the recent turns inside the prompt (stays under its 4,096-token window; avoids the context-error type whose name changed between SDKs).
+- **Apple instructions done right:** `LanguageModelSession(instructions:)` — fixes "I am not AERO, I am a foundation model".
+- **TinyLlama replaced:** AERO Lite = Qwen3 1.7B Q4_K_M (1.1 GB, unsloth) for iPhone 13/14/15; AERO Pro = Qwen3 4B Q4_K_M (2.5 GB, Qwen official) for iPhone 15 Pro and newer (picked from the `iPhoneNN,x` identifier, NN ≥ 16). Apache-2.0 licensed. Thinking mode off (`enableThinking: false`), `<think>` text stripped.
+- **Engine order (phone):** AERO Pro → Apple Intelligence → AERO Lite → Home server. Desktop: Ollama first. Override in AERO ⚙ → Thinking engine.
+- **Honesty rule:** never invent places, addresses, distances, scripture or stats; says so when unsure.
+- **Live data on topic:** questions about habits/tasks/money/plans attach a short snapshot of the user's data.
+- Old TinyLlama file can be removed from AERO ⚙.
+
 ## 0. Executive Summary — What Is Onyx Beacon?
 
 All-in-one Life Command Center in ONE `lib/main.dart` (intentional):

@@ -570,27 +570,27 @@ extension WritingStatusExt on WritingStatus {
 }
 
 
-// ==================== AERO — 4-ENGINE ARCHITECTURE (iPhone first) ====================
-// AERO is the brand on the dashboard + the SQLite brain. The engine that talks is swappable:
-//   Core (always, instant, no model) → Engine 1 TinyLlama (on-device file, offline, VPN-proof)
-//   → Engine 2 Apple Intelligence (FoundationModels via MethodChannel) → Engine 3 Ollama (Surface, same Wi-Fi)
-// AeroRouter detects what exists, picks automatically, falls through on failure, and never nags.
+// ==================== AERO — personal assistant, 4 engines (iPhone first) ====================
+// AERO is the assistant; the engine that does the thinking is swappable and picked automatically:
+//   Quick answers (instant, from SQLite) → on-device model (AERO Lite / AERO Pro, offline)
+//   → Apple Intelligence (FoundationModels, iOS 26+) → Home server (Ollama on a PC on the same Wi-Fi).
+// AeroRouter detects what exists, keeps the conversation, falls through on failure, and never nags.
 
-enum AeroEngine { core, tinyllama, apple, ollama }
+enum AeroEngine { core, local, apple, ollama }
 
 extension AeroEngineExt on AeroEngine {
   String get shortName {
     switch (this) {
-      case AeroEngine.core: return 'AERO Core';
-      case AeroEngine.tinyllama: return 'TinyLlama';
+      case AeroEngine.core: return 'Quick answer';
+      case AeroEngine.local: return AeroOnDeviceService.activeSpec?.name ?? 'On-device model';
       case AeroEngine.apple: return 'Apple Intelligence';
-      case AeroEngine.ollama: return 'Ollama';
+      case AeroEngine.ollama: return 'Home server';
     }
   }
   IconData get icon {
     switch (this) {
-      case AeroEngine.core: return Icons.memory;
-      case AeroEngine.tinyllama: return Icons.phone_iphone;
+      case AeroEngine.core: return Icons.bolt;
+      case AeroEngine.local: return Icons.phone_iphone;
       case AeroEngine.apple: return Icons.auto_awesome;
       case AeroEngine.ollama: return Icons.computer;
     }
@@ -598,7 +598,7 @@ extension AeroEngineExt on AeroEngine {
   Color get color {
     switch (this) {
       case AeroEngine.core: return Colors.blueGrey;
-      case AeroEngine.tinyllama: return Colors.green;
+      case AeroEngine.local: return Colors.green;
       case AeroEngine.apple: return Colors.deepPurple;
       case AeroEngine.ollama: return Colors.orange;
     }
@@ -632,41 +632,30 @@ class AeroMessage {
   AeroMessage({required this.isUser, required this.text, this.engine, this.streaming = false, this.note});
 }
 
-// --- Prompts: real time + Bible deep mode, shared by every engine ---
-class AeroPrompts {
-  static String realTime() => DateFormat('yyyy-MM-dd HH:mm:ss EEEE').format(DateTime.now());
-
-  static final RegExp _verseRef = RegExp(r'\b(?:[1-3]\s?)?(?:gen|genesis|exod|exodus|lev|num|deut|josh|judg|ruth|sam|samuel|kings|chron|ezra|neh|esther|job|ps|psalms?|prov|proverbs|eccl|song|isa|isaiah|jer|lam|ezek|dan|hos|joel|amos|obad|jonah|mic|nah|hab|zeph|hag|zech|mal|matt|matthew|mark|luke|john|acts|rom|romans|cor|corinthians|gal|eph|phil|col|thess|tim|titus|philem|heb|james|pet|peter|jude|rev)\.?\s\d{1,3}:\d{1,3}\b');
-  static const List<String> _bibleWords = [
-    'bible', 'verse', 'scripture', 'psalm', 'proverb', 'romans', 'genesis', 'exodus', 'gospel',
-    'jesus', 'christ', 'god', 'faith', 'pray', 'prayer', 'holy spirit', 'apostle', 'corinthians',
-    'ephesians', 'philippians', 'hebrews', 'isaiah', 'revelation', 'matthew', 'luke',
-  ];
-
-  static bool isBible(String text) {
-    final l = text.toLowerCase();
-    return _bibleWords.any(l.contains) || _verseRef.hasMatch(l);
-  }
-
-  static String system(String userText, {bool short = true}) {
-    final now = realTime();
-    final limit = short ? ' Keep answers under 150 words unless asked for more.' : '';
-    if (isBible(userText)) {
-      return 'You are AERO, Bible scholar and life coach inside Onyx Beacon for Caleb in Detroit. '
-          'Real time: $now (America/Detroit). Deep Bible knowledge: give book chapter:verse, '
-          'cross-references, original Greek/Hebrew when it helps, and practical Detroit lifestyle application. '
-          'Never invent verses; say so if unsure. Never guess the date — use the real time given.$limit';
-    }
-    return 'You are AERO, the private on-device assistant inside Onyx Beacon (habits, tasks, finance, writing) '
-        'for Caleb in Detroit. Real time: $now (America/Detroit). Be accurate, concise and practical. '
-        'Never guess the date — use the real time given.$limit';
-  }
+/// A downloadable on-device model. Sizes are the exact byte counts of the files on Hugging Face.
+class AeroModelSpec {
+  final String id;
+  final String name;
+  final String subtitle;
+  final String url;
+  final String fileName;
+  final int bytes;
+  final bool needsNewerPhone;
+  const AeroModelSpec({required this.id, required this.name, required this.subtitle, required this.url,
+      required this.fileName, required this.bytes, this.needsNewerPhone = false});
+  int get sizeMB => bytes ~/ (1024 * 1024);
+  String get sizeLabel => '${(bytes / 1000000000).toStringAsFixed(1)} GB';
 }
 
-// --- Persisted AERO settings (Ollama endpoint) — survives restarts, no extra package ---
+// --- Persisted AERO settings: who the user is, which engine/model they prefer, Ollama endpoint ---
 class AeroSettings {
   static String ollamaUrl = (Platform.isIOS || Platform.isAndroid) ? 'http://192.168.1.15:11434' : 'http://localhost:11434';
   static String ollamaModel = 'llama3';
+  static String userName = '';
+  static String userCity = '';
+  static String userAbout = '';
+  static String preferredModelId = '';
+  static String preferredEngine = 'auto'; // auto | apple | local | ollama
   static bool _loaded = false;
 
   static Future<File> _file() async {
@@ -683,26 +672,145 @@ class AeroSettings {
       final f = await _file();
       if (!await f.exists()) return;
       final data = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
-      ollamaUrl = (data['ollamaUrl'] as String?)?.trim().isNotEmpty == true ? data['ollamaUrl'] as String : ollamaUrl;
-      ollamaModel = (data['ollamaModel'] as String?)?.trim().isNotEmpty == true ? data['ollamaModel'] as String : ollamaModel;
+      String read(String key, String fallback) {
+        final v = data[key];
+        return (v is String && v.trim().isNotEmpty) ? v : fallback;
+      }
+      ollamaUrl = read('ollamaUrl', ollamaUrl);
+      ollamaModel = read('ollamaModel', ollamaModel);
+      userName = read('userName', '');
+      userCity = read('userCity', '');
+      userAbout = read('userAbout', '');
+      preferredModelId = read('preferredModelId', '');
+      preferredEngine = read('preferredEngine', 'auto');
     } catch (e) {
       debugPrint('[AERO] settings load failed: $e');
     }
   }
 
-  static Future<void> save({required String url, required String model}) async {
-    ollamaUrl = url.trim().isEmpty ? ollamaUrl : url.trim();
-    ollamaModel = model.trim().isEmpty ? ollamaModel : model.trim();
+  static Future<void> _write() async {
     try {
       final f = await _file();
-      await f.writeAsString(jsonEncode({'ollamaUrl': ollamaUrl, 'ollamaModel': ollamaModel}));
+      await f.writeAsString(jsonEncode({
+        'ollamaUrl': ollamaUrl,
+        'ollamaModel': ollamaModel,
+        'userName': userName,
+        'userCity': userCity,
+        'userAbout': userAbout,
+        'preferredModelId': preferredModelId,
+        'preferredEngine': preferredEngine,
+      }));
     } catch (e) {
       debugPrint('[AERO] settings save failed: $e');
     }
   }
+
+  static Future<void> saveOllama({required String url, required String model}) async {
+    if (url.trim().isNotEmpty) ollamaUrl = url.trim();
+    if (model.trim().isNotEmpty) ollamaModel = model.trim();
+    await _write();
+  }
+
+  static Future<void> saveProfile({required String name, required String city, required String about}) async {
+    userName = name.trim();
+    userCity = city.trim();
+    userAbout = about.trim();
+    await _write();
+  }
+
+  static Future<void> savePreferences({String? modelId, String? engine}) async {
+    if (modelId != null) preferredModelId = modelId;
+    if (engine != null) preferredEngine = engine;
+    await _write();
+  }
 }
 
-// --- Engine 3: Ollama (Surface on same Wi-Fi, or localhost on Windows) ---
+// --- Prompts: one personal assistant tailored to whoever uses the app ---
+class AeroPrompts {
+  static String realTime() => DateFormat("EEEE, MMMM d, yyyy 'at' h:mm a").format(DateTime.now());
+
+  static final RegExp _verseRef = RegExp(r'\b(?:[1-3]\s?)?(?:gen|genesis|exod|exodus|lev|num|deut|josh|judg|ruth|sam|samuel|kings|chron|ezra|neh|esther|job|ps|psalms?|prov|proverbs|eccl|song|isa|isaiah|jer|lam|ezek|dan|hos|joel|amos|obad|jonah|mic|nah|hab|zeph|hag|zech|mal|matt|matthew|mark|luke|john|acts|rom|romans|cor|corinthians|gal|eph|phil|col|thess|tim|titus|philem|heb|james|pet|peter|jude|rev)\.?\s\d{1,3}:\d{1,3}\b');
+  static const List<String> _scriptureWords = ['bible', 'verse', 'scripture', 'psalm', 'proverb', 'gospel', 'jesus', 'christ', 'prayer'];
+
+  static bool looksLikeScripture(String text) {
+    final l = text.toLowerCase();
+    return _scriptureWords.any(l.contains) || _verseRef.hasMatch(l);
+  }
+
+  /// Short on purpose: small models follow 1–3 tight paragraphs far better than long rule lists.
+  static String chat({String? snapshot}) {
+    final name = AeroSettings.userName.trim();
+    final city = AeroSettings.userCity.trim();
+    final about = AeroSettings.userAbout.trim();
+    final b = StringBuffer('You are AERO, the personal assistant inside the Onyx Beacon app');
+    if (name.isNotEmpty) b.write(', talking with $name');
+    if (city.isNotEmpty) b.write(' (based in $city)');
+    b.writeln('.');
+    if (about.isNotEmpty) b.writeln('About them: $about');
+    b.writeln('Right now it is ${realTime()}, their local time.');
+    b.writeln('Be warm, direct and genuinely useful on any topic: ideas, advice, planning, learning, writing, faith, '
+        'health and money. Match their tone. Keep replies short unless they ask for depth. '
+        'Use the conversation so far to understand follow-up questions.');
+    b.writeln("Be honest: never invent places, businesses, addresses, distances, quotes, scripture or statistics. "
+        "If you aren't sure, say so in one line and still give your most useful guidance. You can't browse the "
+        "internet or see their live location, so for hours, prices or what's nearby, share what you reliably know "
+        'and suggest checking Maps.');
+    if (snapshot != null && snapshot.isNotEmpty) b.writeln('Their Onyx Beacon data right now:\n$snapshot');
+    return b.toString().trim();
+  }
+
+  static String writing() => "You are AERO, a skilled writing assistant. Do exactly what the instruction asks with "
+      "the text provided and keep the author's voice. Reply with only the result, no preamble.";
+}
+
+// --- Live data snapshot: only attached when the question is about the user's own life/data ---
+class AeroContext {
+  static const List<String> _triggers = [
+    'habit', 'task', 'todo', 'to-do', 'to do', 'plan', 'today', 'tomorrow', 'week', 'schedule', 'routine',
+    'productiv', 'focus', 'priorit', 'goal', 'progress', 'streak', 'money', 'spend', 'spent', 'budget',
+    'financ', 'income', 'saving', 'journal', 'writing', 'motivat',
+  ];
+
+  static bool relevant(String text) {
+    final l = text.toLowerCase();
+    return _triggers.any(l.contains);
+  }
+
+  static Future<String> snapshot() async {
+    try {
+      final db = await DatabaseHelper.instance.database;
+      final now = DateTime.now();
+      final today = DateFormat('yyyy-MM-dd').format(now);
+      final weekAgo = DateFormat('yyyy-MM-dd').format(now.subtract(const Duration(days: 7)));
+      final habits = await db.query('habits');
+      final done = await db.query('habit_completions', where: 'completed_date = ?', whereArgs: [today]);
+      final doneIds = done.map((e) => e['habit_id']).toSet();
+      final left = habits.where((h) => !doneIds.contains(h['id'])).map((h) => h['name'].toString()).toList();
+      final open = await db.query('tasks', where: 'isCompleted = 0', limit: 8);
+      final txs = await db.query('transactions', where: 'date >= ?', whereArgs: [DateFormat('yyyy-MM-01').format(now)]);
+      double inc = 0, exp = 0;
+      for (final t in txs) {
+        final amt = (t['amount'] as num).toDouble();
+        if (t['type'] == 'Income') { inc += amt; } else { exp += amt; }
+      }
+      final checkins = await db.query('habit_completions', where: 'completed_date >= ?', whereArgs: [weekAgo]);
+      final entries = await db.query('journal_entries', where: 'date >= ?', whereArgs: [weekAgo]);
+      final lines = <String>[
+        if (habits.isEmpty) '- Habits: none set up yet'
+        else '- Habits today: ${habits.length - left.length} of ${habits.length} done${left.isEmpty ? '' : '; still to do: ${left.take(6).join(', ')}'}',
+        if (open.isEmpty) '- Open tasks: none' else '- Open tasks: ${open.map((t) => t['title']).join('; ')}',
+        '- This month: income \$${inc.toStringAsFixed(0)}, spent \$${exp.toStringAsFixed(0)}',
+        '- Last 7 days: ${checkins.length} habit check-ins, ${entries.length} journal entries',
+      ];
+      return lines.join('\n');
+    } catch (e) {
+      debugPrint('[AERO] snapshot failed: $e');
+      return '';
+    }
+  }
+}
+
+// --- Engine 3: Ollama (a PC on the same Wi-Fi, or localhost on Windows) ---
 class AiCopilotService {
   static String get baseUrl => AeroSettings.ollamaUrl;
   static String get model => AeroSettings.ollamaModel;
@@ -717,7 +825,7 @@ class AiCopilotService {
   }
 
   /// Throws [AeroException] on any failure so the router can fall back silently.
-  static Future<String> chat(String userText, {String? system}) async {
+  static Future<String> chat({required String system, required List<AeroMessage> history, required String user}) async {
     final http.Response res;
     try {
       res = await http
@@ -728,8 +836,9 @@ class AiCopilotService {
               'model': model,
               'stream': false,
               'messages': [
-                {'role': 'system', 'content': system ?? AeroPrompts.system(userText, short: false)},
-                {'role': 'user', 'content': userText},
+                {'role': 'system', 'content': system},
+                for (final m in history) {'role': m.isUser ? 'user' : 'assistant', 'content': m.text},
+                {'role': 'user', 'content': user},
               ],
             }),
           )
@@ -746,7 +855,7 @@ class AiCopilotService {
       throw AeroException(AeroErrorKind.unknown, 'Ollama HTTP ${res.statusCode}');
     }
     final data = jsonDecode(res.body);
-    final text = (data['message']?['content'] ?? '').toString().trim();
+    final text = AeroOnDeviceService.cleanThink((data['message']?['content'] ?? '').toString());
     if (text.isEmpty) throw AeroException(AeroErrorKind.empty, 'Ollama returned an empty answer');
     return text;
   }
@@ -778,23 +887,21 @@ class AppleIntelligenceService {
   static String get statusLabel {
     switch (status) {
       case 'available': return 'Ready — on-device, private';
-      case 'deviceNotEligible': return 'This iPhone is not eligible (needs 15 Pro / 16 / 17 series)';
+      case 'deviceNotEligible': return 'Not available on this iPhone (needs 15 Pro or newer)';
       case 'appleIntelligenceNotEnabled': return 'Turn on in Settings → Apple Intelligence & Siri';
       case 'modelNotReady': return 'Apple is still downloading its model — try later';
       case 'osTooOld': return 'Needs iOS 26 or newer';
-      case 'sdkMissing': return 'App was built without the iOS 26 SDK (use Xcode 26 in CI)';
+      case 'sdkMissing': return 'This build was made without the iOS 26 SDK';
       case 'bridgeMissing': return 'Native bridge not registered in this build';
       case 'notIOS': return 'iPhone only';
       default: return 'Checking…';
     }
   }
 
-  static Future<String> generateWithAppleIntelligence(String prompt, {String? instructions}) async {
+  /// [instructions] goes in Apple's real instructions slot; [prompt] carries recent turns + the new message.
+  static Future<String> generate({required String instructions, required String prompt}) async {
     try {
-      final text = await _channel.invokeMethod<String>('generate', {
-        'prompt': prompt,
-        'instructions': instructions ?? AeroPrompts.system(prompt),
-      });
+      final text = await _channel.invokeMethod<String>('generate', {'prompt': prompt, 'instructions': instructions});
       if (text == null || text.trim().isEmpty) {
         throw AeroException(AeroErrorKind.empty, 'Apple Intelligence returned an empty answer');
       }
@@ -810,40 +917,93 @@ class AppleIntelligenceService {
   }
 }
 
-// --- Engine 1 + Core: on-device TinyLlama (works with VPN ON — it's a file, not a network call) ---
+// --- Engine 1 + Quick answers: on-device models (work with VPN on — it's a file, not a network call) ---
 class AeroOnDeviceService {
-  static const String modelFileName = 'tinyllama-1.1b-chat.gguf';
-  static const String modelUrl =
-      'https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf';
-  static const int minValidBytes = 400 * 1024 * 1024;
+  static const List<AeroModelSpec> catalog = [
+    AeroModelSpec(
+      id: 'lite',
+      name: 'AERO Lite',
+      subtitle: 'Qwen3 1.7B • for iPhone 13, 14, 15',
+      url: 'https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf',
+      fileName: 'qwen3-1.7b-q4_k_m.gguf',
+      bytes: 1107409472,
+    ),
+    AeroModelSpec(
+      id: 'pro',
+      name: 'AERO Pro',
+      subtitle: 'Qwen3 4B • smarter, for iPhone 15 Pro and newer',
+      url: 'https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf',
+      fileName: 'qwen3-4b-q4_k_m.gguf',
+      bytes: 2497280256,
+      needsNewerPhone: true,
+    ),
+  ];
+  static const String _legacyFileName = 'tinyllama-1.1b-chat.gguf';
 
-  /// null = idle, 0..1 = downloading. UI listens to this from anywhere (chip, settings).
+  /// null = idle, 0..1 = downloading [downloadingId]. UI listens from anywhere (chip, settings).
   static final ValueNotifier<double?> downloadProgress = ValueNotifier<double?>(null);
+  static String? downloadingId;
   static bool get isDownloading => downloadProgress.value != null;
-  static bool _warmedUp = false;
-  static String? _modelPath;
+  static AeroModelSpec? activeSpec;
+  static final Set<String> _warm = {};
+  static Directory? _dir;
 
-  static Future<String> getModelPath() async {
-    if (_modelPath != null) return _modelPath!;
-    final dir = await getApplicationDocumentsDirectory();
-    final aeroDir = Directory(path.join(dir.path, 'AERO', 'models'));
-    if (!await aeroDir.exists()) await aeroDir.create(recursive: true);
-    _modelPath = path.join(aeroDir.path, modelFileName);
-    return _modelPath!;
+  static Future<Directory> _modelsDir() async {
+    if (_dir != null) return _dir!;
+    final docs = await getApplicationDocumentsDirectory();
+    final d = Directory(path.join(docs.path, 'AERO', 'models'));
+    if (!await d.exists()) await d.create(recursive: true);
+    _dir = d;
+    return d;
   }
 
-  static Future<bool> checkModelExists() async {
+  static Future<String> pathFor(AeroModelSpec spec) async => path.join((await _modelsDir()).path, spec.fileName);
+
+  static AeroModelSpec? byId(String id) {
+    for (final s in catalog) {
+      if (s.id == id) return s;
+    }
+    return null;
+  }
+
+  static Future<bool> isInstalled(AeroModelSpec spec) async {
     try {
-      final f = File(await getModelPath());
-      return await f.exists() && await f.length() > minValidBytes;
+      final f = File(await pathFor(spec));
+      return await f.exists() && await f.length() >= (spec.bytes * 0.98).floor();
     } catch (_) {
       return false;
     }
   }
 
-  static Future<int> getModelSizeMB() async {
+  static Future<List<AeroModelSpec>> installed() async {
+    final out = <AeroModelSpec>[];
+    for (final s in catalog) {
+      if (await isInstalled(s)) out.add(s);
+    }
+    return out;
+  }
+
+  /// iPhone identifiers: iPhone16,x = 15 Pro (8 GB) and newer get Pro; iPhone 13/14/15 (4–6 GB) get Lite.
+  static Future<AeroModelSpec> recommended() async {
     try {
-      final f = File(await getModelPath());
+      if (Platform.isIOS) {
+        final info = await DeviceInfoPlugin().iosInfo;
+        final m = RegExp(r'^iPhone(\d+),').firstMatch(info.utsname.machine);
+        if (m != null) {
+          final major = int.tryParse(m.group(1) ?? '') ?? 0;
+          return major >= 16 ? catalog[1] : catalog[0];
+        }
+      }
+    } catch (e) {
+      debugPrint('[AERO] device check failed: $e');
+    }
+    return catalog[1];
+  }
+
+  /// The old TinyLlama file from earlier builds — offered for removal, no longer used.
+  static Future<int> legacySizeMB() async {
+    try {
+      final f = File(path.join((await _modelsDir()).path, _legacyFileName));
       if (!await f.exists()) return 0;
       return await f.length() ~/ (1024 * 1024);
     } catch (_) {
@@ -851,39 +1011,49 @@ class AeroOnDeviceService {
     }
   }
 
+  static Future<void> deleteLegacy() async {
+    try {
+      final f = File(path.join((await _modelsDir()).path, _legacyFileName));
+      if (await f.exists()) await f.delete();
+    } catch (e) {
+      debugPrint('[AERO] delete legacy failed: $e');
+    }
+  }
+
   /// Downloads to a .part file and only renames it when complete, so a killed download never looks valid.
-  static Future<bool> downloadModel() async {
+  static Future<bool> downloadModel(AeroModelSpec spec) async {
     if (isDownloading) return false;
+    downloadingId = spec.id;
     downloadProgress.value = 0;
     final client = http.Client();
     File? part;
     try {
-      final savePath = await getModelPath();
+      final savePath = await pathFor(spec);
       part = File('$savePath.part');
       if (await part.exists()) await part.delete();
-      final streamed = await client.send(http.Request('GET', Uri.parse(modelUrl)));
+      final streamed = await client.send(http.Request('GET', Uri.parse(spec.url)));
       if (streamed.statusCode != 200) {
         throw AeroException(AeroErrorKind.network, 'Download HTTP ${streamed.statusCode}');
       }
-      final total = streamed.contentLength ?? 0;
+      final total = streamed.contentLength ?? spec.bytes;
       int received = 0;
       final sink = part.openWrite();
       try {
         await for (final chunk in streamed.stream) {
           received += chunk.length;
           sink.add(chunk);
-          if (total > 0) downloadProgress.value = received / total;
+          if (total > 0) downloadProgress.value = (received / total).clamp(0.0, 1.0);
         }
       } finally {
         await sink.close();
       }
-      if ((total > 0 && received != total) || received < minValidBytes) {
-        throw AeroException(AeroErrorKind.modelIncomplete, 'Got ${received ~/ (1024 * 1024)} MB of ${total ~/ (1024 * 1024)} MB');
+      if (received < (spec.bytes * 0.98).floor()) {
+        throw AeroException(AeroErrorKind.modelIncomplete, 'Got ${received ~/ (1024 * 1024)} MB of ${spec.sizeMB} MB');
       }
       final finalFile = File(savePath);
       if (await finalFile.exists()) await finalFile.delete();
       await part.rename(savePath);
-      _warmedUp = false;
+      _warm.remove(spec.id);
       return true;
     } catch (e) {
       debugPrint('[AERO] model download failed: $e');
@@ -893,50 +1063,65 @@ class AeroOnDeviceService {
       return false;
     } finally {
       client.close();
+      downloadingId = null;
       downloadProgress.value = null;
     }
   }
 
-  static Future<void> deleteModel() async {
+  static Future<void> deleteModel(AeroModelSpec spec) async {
     try {
-      final f = File(await getModelPath());
+      final f = File(await pathFor(spec));
       if (await f.exists()) await f.delete();
-      _warmedUp = false;
+      _warm.remove(spec.id);
     } catch (e) {
       debugPrint('[AERO] delete model failed: $e');
     }
   }
 
-  static String _clock() => DateFormat('h:mm a, EEEE, MMM d, yyyy').format(DateTime.now());
+  /// Qwen3 can emit hidden reasoning in <think> tags; never show it (also hides an unfinished block mid-stream).
+  static String cleanThink(String s) {
+    var out = s.replaceAll(RegExp(r'<think>[\s\S]*?</think>'), '');
+    final open = out.indexOf('<think>');
+    if (open >= 0) out = out.substring(0, open);
+    return out.trim();
+  }
+
+  static String _clock() => DateFormat('h:mm a, EEEE, MMMM d, yyyy').format(DateTime.now());
 
   static String _norm(String s) => s.toLowerCase().trim().replaceAll(RegExp(r'[!?.,]+$'), '').trim();
 
-  /// CORE — instant answers straight from the SQLite brain. Works on every device with no model and no network.
-  static Future<String?> coreFastPath(String prompt, {String engineLine = ''}) async {
+  /// QUICK ANSWERS — instant, straight from the SQLite data. Works on every device with no model and no network.
+  static Future<String?> coreFastPath(String prompt) async {
     final lower = _norm(prompt);
     final timeStr = _clock();
     final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
+    final name = AeroSettings.userName.trim();
     const greetings = {'hi', 'hello', 'hey', 'yo', 'hi aero', 'hey aero', 'hello aero', 'good morning', 'good afternoon', 'good evening'};
 
     if (greetings.contains(lower)) {
-      int due = 0, pending = 0;
+      int due = 0, total = 0, pending = 0;
       try {
         final db = await DatabaseHelper.instance.database;
         final habits = await db.query('habits');
         final done = await db.query('habit_completions', where: 'completed_date = ?', whereArgs: [today]);
         final doneIds = done.map((e) => e['habit_id']).toSet();
+        total = habits.length;
         due = habits.where((h) => !doneIds.contains(h['id'])).length;
         pending = (await db.query('tasks', where: 'isCompleted = 0')).length;
       } catch (_) {}
-      final line = engineLine.isEmpty ? '' : ' Talking through $engineLine.';
-      return 'Hi Caleb — AERO here.$line It\'s $timeStr in Detroit. '
-          'From your SQLite brain: $due habit${due == 1 ? '' : 's'} left today, $pending task${pending == 1 ? '' : 's'} pending.';
+      final hello = name.isEmpty ? 'Hey!' : 'Hey $name!';
+      final status = (total == 0 && pending == 0)
+          ? 'What can I help you with?'
+          : (due == 0 && pending == 0)
+              ? "You're all caught up today. What's on your mind?"
+              : "You've got $due habit${due == 1 ? '' : 's'} left today and $pending open task${pending == 1 ? '' : 's'}. Want help with any of them?";
+      return "$hello It's $timeStr. $status";
     }
 
     if (lower.contains('what time') || lower.contains('current time') || lower == 'time' ||
         lower.contains('what day is it') || lower.contains("what's the date") || lower.contains('what is the date') ||
         lower.contains("today's date")) {
-      return 'Current time: $timeStr (AERO Core — device local, 100% offline, VPN ON ok).';
+      return "It's $timeStr.";
     }
 
     if (lower.contains('summarize my last 7 days') || lower.contains('summarize my week') ||
@@ -958,19 +1143,18 @@ class AeroOnDeviceService {
         for (final j in journals) {
           words += (j['content'] as String).split(RegExp(r'\s+')).where((w) => w.isNotEmpty).length;
         }
-        return 'Last 7 days (AERO Core, offline):\n'
-            '• Habits: ${comps.length} completions\n'
-            '• Finance: ${txs.length} transactions, net \$${net.toStringAsFixed(2)}\n'
+        return 'Your last 7 days:\n'
+            '• Habits: ${comps.length} check-ins\n'
+            '• Money: ${txs.length} transactions, net \$${net.toStringAsFixed(2)}\n'
             '• Writing: ${journals.length} entries, $words words\n'
-            '• Tasks: ${doneTasks.length} done, ${openTasks.length} open\n'
-            '($timeStr)';
+            '• Tasks: ${doneTasks.length} done, ${openTasks.length} open';
       } catch (e) {
-        return 'Couldn\'t read your week from SQLite: $e';
+        return "I couldn't read your week just now: $e";
       }
     }
 
-    // The next shortcuts only fire for short, non-Bible questions so real questions reach the model.
-    if (AeroPrompts.isBible(prompt) || lower.length > 60) return null;
+    // The next shortcuts only fire for short, non-scripture questions so real questions reach the model.
+    if (AeroPrompts.looksLikeScripture(prompt) || lower.length > 60) return null;
 
     if (lower.contains('habit') && (lower.contains('today') || lower.contains('due') || lower.contains('left'))) {
       try {
@@ -979,7 +1163,8 @@ class AeroOnDeviceService {
         final done = await db.query('habit_completions', where: 'completed_date = ?', whereArgs: [today]);
         final doneIds = done.map((e) => e['habit_id']).toSet();
         final due = habits.where((h) => !doneIds.contains(h['id'])).map((h) => '• ${h['name']}').toList();
-        return due.isEmpty ? 'Every habit is done today. 🔥' : 'Habits left today:\n${due.join('\n')}';
+        if (habits.isEmpty) return "You haven't added any habits yet — add one in the Habits tab and I'll keep track.";
+        return due.isEmpty ? 'Every habit is done today. 🔥' : 'Still to do today:\n${due.join('\n')}';
       } catch (_) {}
     }
 
@@ -988,11 +1173,11 @@ class AeroOnDeviceService {
       try {
         final db = await DatabaseHelper.instance.database;
         final open = await db.query('tasks', where: 'isCompleted = 0', limit: 12);
-        return open.isEmpty ? 'No pending tasks. 🎉' : 'Pending tasks:\n${open.map((t) => '• ${t['title']}').join('\n')}';
+        return open.isEmpty ? 'No open tasks. 🎉' : 'Open tasks:\n${open.map((t) => '• ${t['title']}').join('\n')}';
       } catch (_) {}
     }
 
-    if (lower.contains('spent') || lower.contains('spending') || lower.contains('balance') || lower.contains('budget')) {
+    if (lower.contains('spent') || lower.contains('spending') || lower.contains('balance')) {
       try {
         final db = await DatabaseHelper.instance.database;
         final monthStart = DateFormat('yyyy-MM-01').format(DateTime.now());
@@ -1002,43 +1187,63 @@ class AeroOnDeviceService {
           final amt = (t['amount'] as num).toDouble();
           if (t['type'] == 'Income') { inc += amt; } else { exp += amt; }
         }
-        return 'This month: income \$${inc.toStringAsFixed(2)}, spent \$${exp.toStringAsFixed(2)}, net \$${(inc - exp).toStringAsFixed(2)} (${txs.length} transactions).';
+        return 'This month: income \$${inc.toStringAsFixed(2)}, spent \$${exp.toStringAsFixed(2)}, '
+            'net \$${(inc - exp).toStringAsFixed(2)} across ${txs.length} transactions.';
       } catch (_) {}
     }
 
     if (lower == 'help' || lower.contains('what can you do')) {
-      return 'Instant (no model): "hi", "what time is it", "summarize my week", "habits left today", "my tasks", "how much have I spent".\n'
-          'Everything else — Bible study, writing help, planning — goes to the best engine on this phone.';
+      return 'Ask me anything — ideas, advice, planning, learning, writing, faith, health or money. '
+          'I also know what\'s in this app, so "plan my day", "summarize my week" or "how much have I spent" work too. '
+          'Everything stays on your phone.';
     }
     return null;
   }
 
-  /// Engine 1 — streams cumulative text through [onPartial]. Throws [AeroException] with the real failure kind.
-  static Future<String> generateOnDevice(String prompt, {void Function(String partial)? onPartial}) async {
-    final modelPath = await getModelPath();
+  /// Engine 1 — streams cleaned, cumulative text through [onPartial]. Throws [AeroException] with the real failure kind.
+  static Future<String> generate(AeroModelSpec spec,
+      {required String system, required List<AeroMessage> history, required String user, void Function(String partial)? onPartial}) async {
+    final modelPath = await pathFor(spec);
     final file = File(modelPath);
     if (!await file.exists()) throw AeroException(AeroErrorKind.modelMissing, 'No model file at $modelPath');
     final size = await file.length();
-    if (size < minValidBytes) {
-      throw AeroException(AeroErrorKind.modelIncomplete, 'Model is only ${size ~/ (1024 * 1024)} MB');
+    if (size < (spec.bytes * 0.98).floor()) {
+      throw AeroException(AeroErrorKind.modelIncomplete, '${spec.name} is only ${size ~/ (1024 * 1024)} MB');
     }
 
     final request = OpenAiRequest(
-      maxTokens: 400,
+      maxTokens: 700,
       messages: [
-        Message(Role.system, AeroPrompts.system(prompt)),
-        Message(Role.user, prompt),
+        Message(Role.system, system),
+        for (final m in history) Message(m.isUser ? Role.user : Role.assistant, m.text),
+        Message(Role.user, user),
       ],
       numGpuLayers: (Platform.isIOS || Platform.isMacOS) ? 99 : 0,
       modelPath: modelPath,
-      contextSize: 2048,
-      temperature: 0.4,
-      topP: 0.9,
+      contextSize: 4096,
+      temperature: 0.7,
+      topP: 0.8,
+      enableThinking: false,
     );
 
     final completer = Completer<String>();
     String latest = '';
     int? requestId;
+    bool timedOut = false;
+    Timer? watchdog;
+    // Watchdog resets on every token: a cold first load gets 2 minutes, then 30 s of silence ends the answer.
+    void arm(Duration d) {
+      watchdog?.cancel();
+      watchdog = Timer(d, () {
+        if (completer.isCompleted) return;
+        timedOut = true;
+        final id = requestId;
+        if (id != null) fllamaCancelInference(id);
+        completer.complete(latest);
+      });
+    }
+
+    arm(_warm.contains(spec.id) ? const Duration(seconds: 60) : const Duration(seconds: 120));
     try {
       requestId = await fllamaChat(request, (String response, String openAiJson, bool done) {
         if (completer.isCompleted) return;
@@ -1046,30 +1251,28 @@ class AeroOnDeviceService {
           completer.completeError(AeroException(AeroErrorKind.initFailed, response));
           return;
         }
-        if (response.isNotEmpty) {
-          latest = response;
+        final cleaned = cleanThink(response);
+        if (cleaned.isNotEmpty) {
+          latest = cleaned;
           onPartial?.call(latest);
+          arm(const Duration(seconds: 30));
         }
         if (done) completer.complete(latest);
       });
     } catch (e) {
-      throw AeroException(AeroErrorKind.initFailed, 'fllama could not start: $e');
+      watchdog?.cancel();
+      throw AeroException(AeroErrorKind.initFailed, 'Could not start the on-device model: $e');
     }
 
-    // First load on a cold phone reads ~640 MB into memory; give it time, then stream.
-    final limit = _warmedUp ? const Duration(seconds: 60) : const Duration(seconds: 120);
     try {
-      final result = await completer.future.timeout(limit);
-      _warmedUp = true;
-      if (result.trim().isEmpty) throw AeroException(AeroErrorKind.empty, 'TinyLlama returned an empty answer');
-      return result.trim();
-    } on TimeoutException {
-      if (requestId != null) fllamaCancelInference(requestId);
-      if (latest.trim().isNotEmpty) {
-        _warmedUp = true;
-        return '${latest.trim()}\n\n[stopped after ${limit.inSeconds}s]';
+      final result = await completer.future;
+      _warm.add(spec.id);
+      if (result.trim().isEmpty) {
+        throw AeroException(timedOut ? AeroErrorKind.timeout : AeroErrorKind.empty, '${spec.name} gave no answer');
       }
-      throw AeroException(AeroErrorKind.timeout, 'No tokens after ${limit.inSeconds}s');
+      return timedOut ? '${result.trim()}…' : result.trim();
+    } finally {
+      watchdog?.cancel();
     }
   }
 }
@@ -1092,26 +1295,29 @@ class AeroEngineInfo {
 class AeroArchitectureService {
   static List<AeroEngineInfo> getEngines(AeroRouter r) {
     final primary = r.primary;
+    final local = r.localModel;
     return [
       AeroEngineInfo(
-        id: AeroEngine.core, name: 'Core', subtitle: 'Always on • instant',
-        description: 'Greetings, time, weekly summary, habits left, tasks, spending — straight from SQLite. No model, no network.',
+        id: AeroEngine.core, name: 'Quick answers', subtitle: 'Always on • instant',
+        description: 'Time, your week, habits left, open tasks and spending — read straight from your data. No model needed.',
         availability: 'Ready', ready: true, active: primary == AeroEngine.core,
       ),
       AeroEngineInfo(
-        id: AeroEngine.tinyllama, name: 'Engine 1 — TinyLlama', subtitle: 'Any iPhone • offline • VPN-proof',
-        description: '1.1B chat model stored on the phone. Downloaded once (~640 MB), then works in airplane mode.',
-        availability: r.hasModel ? '${r.modelSizeMB} MB on device' : (AeroOnDeviceService.isDownloading ? 'Downloading…' : 'Not downloaded'),
-        ready: r.hasModel, active: primary == AeroEngine.tinyllama,
+        id: AeroEngine.local, name: local?.name ?? 'On-device model', subtitle: 'Any iPhone • offline • private',
+        description: 'An open-source model (Qwen3) stored on your phone. Downloaded once over Wi-Fi, then works anywhere — even in airplane mode.',
+        availability: local != null
+            ? '${local.name} installed (${local.sizeLabel})'
+            : (AeroOnDeviceService.isDownloading ? 'Downloading…' : 'Not downloaded — ${r.recommendedModel.name} recommended for this phone'),
+        ready: local != null, active: primary == AeroEngine.local,
       ),
       AeroEngineInfo(
-        id: AeroEngine.apple, name: 'Engine 2 — Apple Intelligence', subtitle: 'iPhone 15 Pro and newer • iOS 26',
-        description: "Apple's on-device foundation model through a native bridge. Free and private.",
+        id: AeroEngine.apple, name: 'Apple Intelligence', subtitle: 'iPhone 15 Pro and newer • iOS 26+',
+        description: "Apple's built-in on-device model. Free, private, nothing to download.",
         availability: AppleIntelligenceService.statusLabel, ready: r.appleAvailable, active: primary == AeroEngine.apple,
       ),
       AeroEngineInfo(
-        id: AeroEngine.ollama, name: 'Engine 3 — Ollama', subtitle: 'Surface on the same Wi-Fi',
-        description: 'Bigger models on your PC. Used only when it is reachable; skipped silently otherwise.',
+        id: AeroEngine.ollama, name: 'Home server', subtitle: 'Ollama on a PC on the same Wi-Fi',
+        description: 'Bigger models running on your computer. Used only when it is reachable; skipped silently otherwise.',
         availability: r.ollamaOnline ? 'Online at ${AeroSettings.ollamaUrl}' : 'Not reachable', ready: r.ollamaOnline,
         active: primary == AeroEngine.ollama,
       ),
@@ -1119,13 +1325,15 @@ class AeroArchitectureService {
   }
 }
 
-// --- The router: detection, auto-pick, fallback, chat history (survives tab switches) ---
+// --- The router: detection, auto-pick, memory, fallback, chat history (survives tab switches) ---
 class AeroRouter extends ChangeNotifier {
   AeroRouter._();
   static final AeroRouter instance = AeroRouter._();
 
-  bool hasModel = false;
-  int modelSizeMB = 0;
+  AeroModelSpec? localModel;
+  AeroModelSpec recommendedModel = AeroOnDeviceService.catalog[0];
+  List<AeroModelSpec> installedModels = [];
+  int legacyMB = 0;
   bool appleAvailable = false;
   bool ollamaOnline = false;
   bool detecting = false;
@@ -1134,19 +1342,49 @@ class AeroRouter extends ChangeNotifier {
   DateTime? _lastDetect;
   final List<AeroMessage> messages = [];
 
+  bool get hasModel => localModel != null;
+  int get modelSizeMB => localModel?.sizeMB ?? 0;
+
+  bool _available(AeroEngine e) {
+    switch (e) {
+      case AeroEngine.core: return true;
+      case AeroEngine.local: return hasModel;
+      case AeroEngine.apple: return appleAvailable;
+      case AeroEngine.ollama: return ollamaOnline;
+    }
+  }
+
+  /// Smartest available first. Phone: AERO Pro (4B) > Apple (~3B) > AERO Lite (1.7B) > home server.
+  /// Desktop: the PC's own Ollama first. A preference chosen in settings jumps to the front when available.
+  List<AeroEngine> get _modelOrder {
+    final desktop = Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+    final List<AeroEngine> auto;
+    if (desktop) {
+      auto = [AeroEngine.ollama, AeroEngine.local, AeroEngine.apple];
+    } else if (localModel?.id == 'pro') {
+      auto = [AeroEngine.local, AeroEngine.apple, AeroEngine.ollama];
+    } else {
+      auto = [AeroEngine.apple, AeroEngine.local, AeroEngine.ollama];
+    }
+    final pref = AeroEngine.values.where((e) => e.name == AeroSettings.preferredEngine).toList();
+    final ordered = [
+      if (pref.isNotEmpty && pref.first != AeroEngine.core) pref.first,
+      ...auto.where((e) => pref.isEmpty || e != pref.first),
+    ];
+    return ordered.where(_available).toList();
+  }
+
   AeroEngine get primary {
-    if (hasModel) return AeroEngine.tinyllama;
-    if (appleAvailable) return AeroEngine.apple;
-    if (ollamaOnline) return AeroEngine.ollama;
-    return AeroEngine.core;
+    final order = _modelOrder;
+    return order.isEmpty ? AeroEngine.core : order.first;
   }
 
   String get engineLabel {
     switch (primary) {
-      case AeroEngine.core: return 'AERO Core • instant • offline';
-      case AeroEngine.tinyllama: return 'Engine 1 TinyLlama • $modelSizeMB MB • offline';
-      case AeroEngine.apple: return 'Engine 2 Apple Intelligence • on-device';
-      case AeroEngine.ollama: return 'Engine 3 Ollama • Surface';
+      case AeroEngine.core: return 'Quick answers • set up on-device AI in ⚙';
+      case AeroEngine.local: return '${localModel?.name ?? 'On-device'} • on-device • private';
+      case AeroEngine.apple: return 'Apple Intelligence • on-device • private';
+      case AeroEngine.ollama: return 'Home server • Ollama';
     }
   }
 
@@ -1158,19 +1396,23 @@ class AeroRouter extends ChangeNotifier {
     notifyListeners();
     try {
       await AeroSettings.load();
-      final results = await Future.wait<Object>([
-        AeroOnDeviceService.checkModelExists(),
-        AeroOnDeviceService.getModelSizeMB(),
+      final results = await Future.wait<Object?>([
+        AeroOnDeviceService.installed(),
         AppleIntelligenceService.checkAvailability(),
         AiCopilotService.checkConnection(),
         _deviceLabel(),
+        AeroOnDeviceService.recommended(),
+        AeroOnDeviceService.legacySizeMB(),
       ]);
-      hasModel = results[0] as bool;
-      modelSizeMB = results[1] as int;
-      appleAvailable = results[2] as bool;
-      ollamaOnline = results[3] as bool;
-      deviceLabel = results[4] as String;
-      debugPrint('[AERO] detect: model=$hasModel ($modelSizeMB MB) apple=${AppleIntelligenceService.status} '
+      installedModels = results[0] as List<AeroModelSpec>;
+      appleAvailable = results[1] as bool;
+      ollamaOnline = results[2] as bool;
+      deviceLabel = results[3] as String;
+      recommendedModel = results[4] as AeroModelSpec;
+      legacyMB = results[5] as int;
+      localModel = _pickLocal();
+      AeroOnDeviceService.activeSpec = localModel;
+      debugPrint('[AERO] detect: local=${localModel?.id} apple=${AppleIntelligenceService.status} '
           'ollama=$ollamaOnline device=$deviceLabel → $engineLabel');
     } catch (e) {
       debugPrint('[AERO] detect failed: $e');
@@ -1179,6 +1421,16 @@ class AeroRouter extends ChangeNotifier {
       detecting = false;
       notifyListeners();
     }
+  }
+
+  AeroModelSpec? _pickLocal() {
+    if (installedModels.isEmpty) return null;
+    for (final id in [AeroSettings.preferredModelId, 'pro', 'lite']) {
+      for (final s in installedModels) {
+        if (s.id == id) return s;
+      }
+    }
+    return installedModels.first;
   }
 
   static Future<String> _deviceLabel() async {
@@ -1193,68 +1445,113 @@ class AeroRouter extends ChangeNotifier {
     }
   }
 
-  List<AeroEngine> get _modelOrder => [
-        if (hasModel) AeroEngine.tinyllama,
-        if (appleAvailable) AeroEngine.apple,
-        if (ollamaOnline) AeroEngine.ollama,
-      ];
+  /// Last turns that fit the small models' context: up to 8 messages / ~2,400 characters, starting with a user turn.
+  static List<AeroMessage> recentHistory(List<AeroMessage> prior) {
+    final out = <AeroMessage>[];
+    int chars = 0;
+    for (int i = prior.length - 1; i >= 0 && out.length < 8; i--) {
+      final m = prior[i];
+      if (m.streaming || m.text.trim().isEmpty) continue;
+      final t = m.text.length > 800 ? '${m.text.substring(0, 800)}…' : m.text;
+      if (chars + t.length > 2400) break;
+      chars += t.length;
+      out.insert(0, AeroMessage(isUser: m.isUser, text: t));
+    }
+    while (out.isNotEmpty && !out.first.isUser) {
+      out.removeAt(0);
+    }
+    return out;
+  }
 
-  Future<String> _run(AeroEngine e, String prompt, void Function(String)? onPartial) {
+  static String _appleTranscript(List<AeroMessage> history, String user) {
+    if (history.isEmpty) return user;
+    final b = StringBuffer('Conversation so far:\n');
+    for (final m in history) {
+      b.writeln('${m.isUser ? 'User' : 'AERO'}: ${m.text}');
+    }
+    b.write("\nUser's new message: $user");
+    return b.toString();
+  }
+
+  Future<String> _run(AeroEngine e, String user, List<AeroMessage> history, String system, void Function(String)? onPartial) {
     switch (e) {
-      case AeroEngine.tinyllama: return AeroOnDeviceService.generateOnDevice(prompt, onPartial: onPartial);
-      case AeroEngine.apple: return AppleIntelligenceService.generateWithAppleIntelligence(prompt);
-      case AeroEngine.ollama: return AiCopilotService.chat(prompt);
-      case AeroEngine.core: throw AeroException(AeroErrorKind.unavailable, 'Core has no model');
+      case AeroEngine.local:
+        {
+          final spec = localModel;
+          if (spec == null) throw AeroException(AeroErrorKind.modelMissing, 'No on-device model installed');
+          return AeroOnDeviceService.generate(spec, system: system, history: history, user: user, onPartial: onPartial);
+        }
+      case AeroEngine.apple:
+        return AppleIntelligenceService.generate(instructions: system, prompt: _appleTranscript(history, user));
+      case AeroEngine.ollama:
+        return AiCopilotService.chat(system: system, history: history, user: user);
+      case AeroEngine.core:
+        throw AeroException(AeroErrorKind.unavailable, 'Quick answers have no model');
     }
   }
 
-  /// Tries each available model engine in priority order; falls back quietly. Never throws.
-  Future<AeroReply> ask(String prompt, {void Function(String partial)? onPartial, bool allowCore = true}) async {
+  /// Tries each available engine in order; falls back quietly. Never throws.
+  Future<AeroReply> ask(String prompt,
+      {List<AeroMessage> history = const [], void Function(String partial)? onPartial, bool allowCore = true, bool writing = false}) async {
     if (allowCore) {
-      final core = await AeroOnDeviceService.coreFastPath(prompt, engineLine: engineLabel);
-      if (core != null) return AeroReply(core, AeroEngine.core);
+      final quick = await AeroOnDeviceService.coreFastPath(prompt);
+      if (quick != null) return AeroReply(quick, AeroEngine.core);
+    }
+    final String system;
+    if (writing) {
+      system = AeroPrompts.writing();
+    } else {
+      system = AeroPrompts.chat(snapshot: AeroContext.relevant(prompt) ? await AeroContext.snapshot() : null);
     }
     final failures = <String>[];
     for (final e in _modelOrder) {
       try {
-        final text = await _run(e, prompt, onPartial);
-        return AeroReply(text, e, note: failures.isEmpty ? null : 'Fell back: ${failures.join('; ')}');
+        final text = await _run(e, prompt, history, system, onPartial);
+        return AeroReply(text, e, note: failures.isEmpty ? null : 'switched from ${failures.join(', ')}');
       } on AeroException catch (ex) {
         debugPrint('[AERO] ${e.shortName} failed → $ex');
-        failures.add('${e.shortName} ${ex.kind.name}');
-        if (ex.kind == AeroErrorKind.modelMissing || ex.kind == AeroErrorKind.modelIncomplete) {
-          hasModel = false;
+        failures.add(e.shortName);
+        if (e == AeroEngine.local && (ex.kind == AeroErrorKind.modelMissing || ex.kind == AeroErrorKind.modelIncomplete)) {
+          localModel = null;
+          AeroOnDeviceService.activeSpec = null;
           notifyListeners();
         }
-        if (e == AeroEngine.ollama) {
+        if (e == AeroEngine.apple && ex.kind == AeroErrorKind.unavailable) {
+          appleAvailable = false;
+          notifyListeners();
+        }
+        if (e == AeroEngine.ollama && (ex.kind == AeroErrorKind.network || ex.kind == AeroErrorKind.timeout)) {
           ollamaOnline = false;
           notifyListeners();
         }
       } catch (ex) {
         debugPrint('[AERO] ${e.shortName} crashed → $ex');
-        failures.add('${e.shortName} error');
+        failures.add(e.shortName);
       }
     }
-    final hint = AeroOnDeviceService.isDownloading
-        ? 'The offline model is downloading — once it finishes I can answer this fully.'
-        : 'That one needs a language model. Tap Download in the bar above once (~640 MB) and I\'ll answer anything offline, VPN on or off.';
+    final progress = AeroOnDeviceService.downloadProgress.value;
+    final hint = progress != null
+        ? "My on-device brain is still downloading (${(progress * 100).toStringAsFixed(0)}%). Ask me again when it's done."
+        : "I'll need my on-device brain for that one. Tap Set up in the bar above — it's a one-time "
+            '${recommendedModel.sizeLabel} download over Wi-Fi, then I work offline and privately.';
     return AeroReply(
-      'AERO Core: $hint\nInstant right now: "summarize my week", "habits left today", "my tasks", "what time is it".',
+      '$hint\nRight now I can instantly summarize your week, list what\'s left today, show open tasks or check your spending.',
       AeroEngine.core,
-      note: failures.isEmpty ? null : 'Tried: ${failures.join('; ')}',
     );
   }
 
   /// Chat entry point: keeps history, streams into the last bubble.
   Future<void> send(String text) async {
-    if (busy || text.trim().isEmpty) return;
+    final clean = text.trim();
+    if (busy || clean.isEmpty) return;
     busy = true;
-    messages.add(AeroMessage(isUser: true, text: text.trim()));
+    final history = recentHistory(messages);
+    messages.add(AeroMessage(isUser: true, text: clean));
     final bubble = AeroMessage(isUser: false, text: '', streaming: true);
     messages.add(bubble);
     notifyListeners();
     try {
-      final reply = await ask(text.trim(), onPartial: (partial) {
+      final reply = await ask(clean, history: history, onPartial: (partial) {
         bubble.text = partial;
         notifyListeners();
       });
@@ -1262,7 +1559,7 @@ class AeroRouter extends ChangeNotifier {
       bubble.engine = reply.engine;
       bubble.note = reply.note;
     } catch (e) {
-      bubble.text = 'AERO error: $e';
+      bubble.text = 'Something went wrong on my end: $e';
       bubble.engine = AeroEngine.core;
     } finally {
       bubble.streaming = false;
@@ -1271,11 +1568,26 @@ class AeroRouter extends ChangeNotifier {
     }
   }
 
-  /// Writing Hub helper — always goes to a model engine (no Core shortcuts). Long drafts are trimmed for TinyLlama's 2K context.
+  /// Writing Hub helper — always goes to a model engine (no quick answers). Long drafts are trimmed for small context windows.
   Future<AeroReply> assistWriting(String instruction, String text) {
-    final body = text.length > 4500 ? '${text.substring(0, 4500)}\n[…trimmed]' : text;
-    return ask('$instruction\n\n---\n$body', allowCore: false);
+    final body = text.length > 6000 ? '${text.substring(0, 6000)}\n[…trimmed]' : text;
+    return ask('$instruction\n\n---\n$body', allowCore: false, writing: true);
   }
+
+  Future<void> setPreferredEngine(String engine) async {
+    await AeroSettings.savePreferences(engine: engine);
+    notifyListeners();
+  }
+
+  Future<void> useModel(AeroModelSpec spec) async {
+    await AeroSettings.savePreferences(modelId: spec.id);
+    localModel = _pickLocal();
+    AeroOnDeviceService.activeSpec = localModel;
+    notifyListeners();
+  }
+
+  /// Called after the profile changes so greetings, prompts and the dashboard update immediately.
+  void profileChanged() => notifyListeners();
 
   void clear() {
     messages.clear();
@@ -1930,7 +2242,13 @@ class _DashboardHomeTabState extends State<DashboardHomeTab> {
           return ListView(
             padding: const EdgeInsets.all(16.0),
             children: [
-              const Text('Welcome back, Caleb.', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+              ListenableBuilder(
+                listenable: AeroRouter.instance,
+                builder: (context, _) {
+                  final name = AeroSettings.userName.trim();
+                  return Text(name.isEmpty ? 'Welcome back.' : 'Welcome back, $name.', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold));
+                },
+              ),
               const SizedBox(height: 16),
               DailyBriefingWidget(onNavigateToTab: widget.onNavigateToTab),
               const SizedBox(height: 12),
@@ -3252,7 +3570,7 @@ class _P2PSyncCardState extends State<P2PSyncCard> {
           children: [
             Row(children:[const Icon(Icons.sync_alt, size:18, color: Colors.teal), const SizedBox(width:6), const Text('P2P Sync — Local Wi-Fi (Zero Cloud)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)), const Spacer(), if(_serving) const Chip(label: Text('Serving', style: TextStyle(fontSize: 10)), backgroundColor: Colors.green, visualDensity: VisualDensity.compact)]),
             const SizedBox(height: 8),
-            Text('This device IP: $_ip:8765 — Windows host starts server, iPhone 17 Pro Max enters IP to pull onyx_beacon.db directly over local Wi-Fi. No cloud, no fees.', style: const TextStyle(fontSize: 10, color: Colors.grey)),
+            Text('This device: $_ip:8765. Start the server on one device, then tap Sync From IP on another device on the same Wi-Fi to copy its data. No cloud.', style: const TextStyle(fontSize: 10, color: Colors.grey)),
             const SizedBox(height: 8),
             Row(children:[
               Expanded(
@@ -3851,7 +4169,7 @@ class _GameTabState extends State<GameTab> {
   Widget _buildGame(){
     IconData icon; String desc;
     switch(_sel){
-      case "Flappy Onyx": icon = Icons.flutter_dash; desc = "iPhone 17 Pro Max primary — tap to flap, dodge pillars. Offline ready."; break;
+      case "Flappy Onyx": icon = Icons.flutter_dash; desc = "Tap to flap and dodge the pillars. Works offline."; break;
       case "Breakout": icon = Icons.grid_view; desc = "Breakout — classic brick breaker. Flame ready for next push."; break;
       case "Space Shooter": icon = Icons.rocket_launch; desc = "Space Shooter — defend Onyx Beacon. Coming soon."; break;
       default: icon = Icons.extension; desc = "More games coming — suggest in AERO!"; break;
@@ -3862,7 +4180,7 @@ class _GameTabState extends State<GameTab> {
 
 
 
-// ==================== AERO TAB — iPhone first, auto engine, streaming, no nag banners ====================
+// ==================== AERO TAB — personal assistant, auto engine, memory, streaming ====================
 class AiChatTab extends StatefulWidget {
   const AiChatTab({super.key});
   @override
@@ -3876,9 +4194,16 @@ class _AiChatTabState extends State<AiChatTab> {
   final ScrollController _scrollCtrl = ScrollController();
   bool _listening = false;
   int _lastCount = 0;
-  String _lastTail = '';
+  int _lastTailLength = 0;
 
   bool get _voiceSupported => Platform.isIOS || Platform.isAndroid || Platform.isMacOS;
+
+  static const List<String> _suggestions = [
+    'Plan my day',
+    'Summarize my week',
+    'Give me a quick motivation boost',
+    'Help me write something',
+  ];
 
   @override
   void initState() {
@@ -3898,47 +4223,146 @@ class _AiChatTabState extends State<AiChatTab> {
 
   void _onRouterChanged() {
     final msgs = _router.messages;
-    final tail = msgs.isEmpty ? '' : msgs.last.text;
-    if (msgs.length != _lastCount || tail.length != _lastTail.length) {
+    final tail = msgs.isEmpty ? 0 : msgs.last.text.length;
+    if (msgs.length != _lastCount || tail != _lastTailLength) {
       _lastCount = msgs.length;
-      _lastTail = tail;
+      _lastTailLength = tail;
       _scrollToBottom();
     }
   }
 
-  String get _welcome =>
-      'Hi Caleb — AERO here, iPhone-first. Right now I\'m using ${_router.engineLabel}.\n'
-      'I pick automatically: Core (instant) → TinyLlama (offline, ~640 MB) → Apple Intelligence (15 Pro+, iOS 26) → Ollama (Surface).\n'
-      'Instant without any model: "hi", "what time is it", "summarize my week", "habits left today", "my tasks".';
+  String get _welcome {
+    final name = AeroSettings.userName.trim();
+    if (name.isEmpty) {
+      return "Hey! I'm AERO, your personal assistant. Ask me anything — ideas, advice, planning, learning, writing — "
+          'and I also know your habits, tasks, money and journal in this app. Everything stays on your phone.';
+    }
+    return "Hey $name — what's on your mind? I can help with anything, and I know what's going on in your habits, tasks, money and journal.";
+  }
 
-  Future<void> _send() async {
-    final text = _inputCtrl.text.trim();
+  Future<void> _send([String? preset]) async {
+    final text = (preset ?? _inputCtrl.text).trim();
     if (text.isEmpty || _router.busy) return;
     if (_listening) _stopListening();
-    _inputCtrl.clear();
+    if (preset == null) _inputCtrl.clear();
     await _router.send(text);
   }
 
-  Future<void> _startDownload() async {
-    final ok = await AeroOnDeviceService.downloadModel();
+  Future<void> _download(AeroModelSpec spec) async {
+    if (AeroOnDeviceService.isDownloading) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(SnackBar(content: Text('Downloading ${spec.name} (${spec.sizeLabel}) — keep Onyx Beacon open and on Wi-Fi.')));
+    final ok = await AeroOnDeviceService.downloadModel(spec);
+    if (ok) await _router.useModel(spec);
     await _router.detect(force: true);
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+    messenger.showSnackBar(SnackBar(
       content: Text(ok
-          ? 'Offline model ready (${_router.modelSizeMB} MB) — AERO now answers with VPN on, no Surface needed.'
-          : 'Download did not finish — check Wi-Fi and keep the app open, then tap Download again.'),
+          ? '${spec.name} is ready — AERO now thinks on your phone, online or offline.'
+          : "The download didn't finish. Check Wi-Fi, keep the app open, and tap Set up again."),
     ));
+  }
+
+  void _showProfile() {
+    final nameCtrl = TextEditingController(text: AeroSettings.userName);
+    final cityCtrl = TextEditingController(text: AeroSettings.userCity);
+    final aboutCtrl = TextEditingController(text: AeroSettings.userAbout);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Personalize AERO'),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('AERO uses this to talk to you like it knows you. It stays on this device.', style: TextStyle(fontSize: 12, color: Colors.grey)),
+            const SizedBox(height: 12),
+            TextField(controller: nameCtrl, textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(labelText: 'What should AERO call you?', border: OutlineInputBorder(), isDense: true)),
+            const SizedBox(height: 10),
+            TextField(controller: cityCtrl, textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(labelText: 'City (optional)', hintText: 'Helps with local suggestions', border: OutlineInputBorder(), isDense: true)),
+            const SizedBox(height: 10),
+            TextField(controller: aboutCtrl, minLines: 3, maxLines: 5, textCapitalization: TextCapitalization.sentences,
+                decoration: const InputDecoration(
+                  labelText: 'About you (optional)',
+                  hintText: 'e.g. Student, into fitness and faith, writing a book, saving for a car',
+                  alignLabelWithHint: true,
+                  border: OutlineInputBorder(),
+                )),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () async {
+              await AeroSettings.saveProfile(name: nameCtrl.text, city: cityCtrl.text, about: aboutCtrl.text);
+              _router.profileChanged();
+              if (ctx.mounted) Navigator.pop(ctx);
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _modelTile(AeroModelSpec spec, double? progress) {
+    final installed = _router.installedModels.any((s) => s.id == spec.id);
+    final active = _router.localModel?.id == spec.id;
+    final recommended = _router.recommendedModel.id == spec.id;
+    final double? p = AeroOnDeviceService.downloadingId == spec.id ? progress : null;
+    final tooBig = spec.needsNewerPhone && !recommended && Platform.isIOS;
+    Widget trailing;
+    if (p != null) {
+      trailing = SizedBox(width: 44, child: Text('${(p * 100).toStringAsFixed(0)}%', textAlign: TextAlign.end, style: const TextStyle(fontSize: 11)));
+    } else if (installed) {
+      trailing = Row(mainAxisSize: MainAxisSize.min, children: [
+        if (!active)
+          TextButton(onPressed: () => _router.useModel(spec), child: const Text('Use', style: TextStyle(fontSize: 11))),
+        IconButton(
+          icon: const Icon(Icons.delete_outline, size: 18),
+          tooltip: 'Delete',
+          onPressed: () async {
+            await AeroOnDeviceService.deleteModel(spec);
+            await _router.detect(force: true);
+          },
+        ),
+      ]);
+    } else {
+      trailing = TextButton(
+        onPressed: progress != null ? null : () => _download(spec),
+        child: Text('Get ${spec.sizeLabel}', style: const TextStyle(fontSize: 11)),
+      );
+    }
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      ListTile(
+        dense: true,
+        contentPadding: EdgeInsets.zero,
+        visualDensity: VisualDensity.compact,
+        leading: Icon(active ? Icons.check_circle : Icons.phone_iphone, size: 18, color: active ? Colors.green : Colors.grey),
+        title: Text('${spec.name}${recommended ? '  • best for this phone' : ''}${active ? '  • in use' : ''}',
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+        subtitle: Text(tooBig ? '${spec.subtitle} — may be too large for this iPhone' : spec.subtitle,
+            style: TextStyle(fontSize: 10, color: tooBig ? Colors.orange.shade800 : Colors.grey.shade700)),
+        trailing: trailing,
+      ),
+      if (p != null) LinearProgressIndicator(value: p > 0 ? p : null, minHeight: 3),
+    ]);
   }
 
   void _showAeroSettings() {
     final urlCtrl = TextEditingController(text: AeroSettings.ollamaUrl);
     final modelCtrl = TextEditingController(text: AeroSettings.ollamaModel);
+    const engineChoices = {
+      'auto': 'Automatic (smartest available)',
+      'local': 'On-device model',
+      'apple': 'Apple Intelligence',
+      'ollama': 'Home server',
+    };
     showDialog(
       context: context,
       builder: (ctx) => ListenableBuilder(
         listenable: _router,
         builder: (ctx, _) => AlertDialog(
-          title: const Text('AERO Engines'),
+          title: const Text('AERO Settings'),
           content: SingleChildScrollView(
             child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
               Container(
@@ -3948,12 +4372,22 @@ class _AiChatTabState extends State<AiChatTab> {
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Text(_router.engineLabel, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
                   const SizedBox(height: 4),
-                  Text('${_router.deviceLabel} • ${DateFormat('h:mm a EEE MMM d').format(DateTime.now())}',
-                      style: const TextStyle(color: Colors.white70, fontSize: 10)),
+                  Text(_router.deviceLabel, style: const TextStyle(color: Colors.white70, fontSize: 10)),
                 ]),
               ),
-              const SizedBox(height: 8),
-              ...AeroArchitectureService.getEngines(_router).map((e) => ListTile(
+              const SizedBox(height: 12),
+              const Text('Thinking engine', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+              DropdownButton<String>(
+                isExpanded: true,
+                value: engineChoices.containsKey(AeroSettings.preferredEngine) ? AeroSettings.preferredEngine : 'auto',
+                items: engineChoices.entries
+                    .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value, style: const TextStyle(fontSize: 12))))
+                    .toList(),
+                onChanged: (v) {
+                  if (v != null) _router.setPreferredEngine(v);
+                },
+              ),
+              ...AeroArchitectureService.getEngines(_router).where((e) => e.id != AeroEngine.core).map((e) => ListTile(
                     dense: true,
                     contentPadding: EdgeInsets.zero,
                     visualDensity: VisualDensity.compact,
@@ -3962,41 +4396,35 @@ class _AiChatTabState extends State<AiChatTab> {
                     subtitle: Text(e.availability, style: TextStyle(fontSize: 10, color: e.ready ? Colors.green.shade700 : Colors.grey.shade600)),
                   )),
               const Divider(height: 20),
+              const Text('On-device models (download once, then offline)', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
               ValueListenableBuilder<double?>(
                 valueListenable: AeroOnDeviceService.downloadProgress,
-                builder: (ctx, progress, _) {
-                  if (progress != null) {
-                    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      LinearProgressIndicator(value: progress > 0 ? progress : null),
-                      const SizedBox(height: 4),
-                      Text('${(progress * 100).toStringAsFixed(1)}% — keep Onyx Beacon open until it finishes', style: const TextStyle(fontSize: 10)),
-                    ]);
-                  }
-                  if (_router.hasModel) {
-                    return Row(children: [
-                      Expanded(child: Text('TinyLlama: ${_router.modelSizeMB} MB on this device', style: const TextStyle(fontSize: 11))),
-                      TextButton.icon(
-                        icon: const Icon(Icons.delete_outline, size: 16),
-                        label: const Text('Delete', style: TextStyle(fontSize: 11)),
-                        onPressed: () async {
-                          await AeroOnDeviceService.deleteModel();
-                          await _router.detect(force: true);
-                        },
-                      ),
-                    ]);
-                  }
-                  return SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton.icon(
-                      icon: const Icon(Icons.download, size: 16),
-                      label: const Text('Download offline model (~640 MB, once)'),
-                      onPressed: _startDownload,
+                builder: (ctx, progress, _) => Column(children: [
+                  for (final spec in AeroOnDeviceService.catalog) _modelTile(spec, progress),
+                  if (progress != null)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 4),
+                      child: Text('Keep Onyx Beacon open until the download finishes.', style: TextStyle(fontSize: 10, color: Colors.grey)),
                     ),
-                  );
-                },
+                ]),
               ),
+              if (_router.legacyMB > 0)
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.cleaning_services_outlined, size: 18),
+                  title: Text('Old TinyLlama model (${_router.legacyMB} MB)', style: const TextStyle(fontSize: 12)),
+                  subtitle: const Text('No longer used — free up the space', style: TextStyle(fontSize: 10)),
+                  trailing: TextButton(
+                    onPressed: () async {
+                      await AeroOnDeviceService.deleteLegacy();
+                      await _router.detect(force: true);
+                    },
+                    child: const Text('Remove', style: TextStyle(fontSize: 11)),
+                  ),
+                ),
               const Divider(height: 20),
-              const Text('Ollama on your Surface (optional)', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+              const Text('Home server (optional): Ollama on a PC on the same Wi-Fi', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
               const SizedBox(height: 6),
               TextField(controller: urlCtrl, style: const TextStyle(fontSize: 12),
                   decoration: const InputDecoration(labelText: 'Ollama URL', hintText: 'http://192.168.1.15:11434', border: OutlineInputBorder(), isDense: true)),
@@ -4010,7 +4438,7 @@ class _AiChatTabState extends State<AiChatTab> {
             TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
             ElevatedButton(
               onPressed: () async {
-                await AeroSettings.save(url: urlCtrl.text, model: modelCtrl.text);
+                await AeroSettings.saveOllama(url: urlCtrl.text, model: modelCtrl.text);
                 if (ctx.mounted) Navigator.pop(ctx);
                 await _router.detect(force: true);
               },
@@ -4028,11 +4456,11 @@ class _AiChatTabState extends State<AiChatTab> {
       builder: (ctx) => ListenableBuilder(
         listenable: _router,
         builder: (ctx, _) => AlertDialog(
-          title: const Text('AERO — 4-Engine Architecture'),
+          title: const Text('How AERO thinks'),
           content: SingleChildScrollView(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('Think of AERO like a car brand: AERO is the name on the dashboard, the memory and the SQLite brain. '
-                  'The engine that talks is swapped automatically.', style: TextStyle(fontSize: 11)),
+              const Text('AERO is the assistant: your profile, your conversation and your app data. '
+                  'The engine that does the thinking is swapped automatically to the smartest one available.', style: TextStyle(fontSize: 11)),
               const SizedBox(height: 10),
               ...AeroArchitectureService.getEngines(_router).map((e) => Card(
                     color: e.color.withValues(alpha: e.active ? 0.22 : 0.08),
@@ -4049,8 +4477,8 @@ class _AiChatTabState extends State<AiChatTab> {
                     ),
                   )),
               const SizedBox(height: 8),
-              const Text('Order: Core shortcut → TinyLlama → Apple Intelligence → Ollama → Core. '
-                  'If an engine fails mid-answer, the next one takes over without asking.', style: TextStyle(fontSize: 10, color: Colors.grey)),
+              const Text('On a phone the order is AERO Pro → Apple Intelligence → AERO Lite → Home server. '
+                  'If one fails mid-answer, the next takes over without asking.', style: TextStyle(fontSize: 10, color: Colors.grey)),
             ]),
           ),
           actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close'))],
@@ -4111,22 +4539,26 @@ class _AiChatTabState extends State<AiChatTab> {
         IconData icon;
         Widget? action;
         if (progress != null) {
-          text = 'Downloading offline model ${(progress * 100).toStringAsFixed(0)}% • keep app open';
+          text = 'Setting up on-device AI ${(progress * 100).toStringAsFixed(0)}% • keep the app open';
           bg = Colors.blue.shade50;
           icon = Icons.downloading;
-        } else if (r.hasModel) {
-          text = '${r.modelSizeMB} MB on-device ready • VPN ON ok • offline';
+        } else if (r.primary == AeroEngine.local) {
+          text = '${r.localModel?.name ?? 'On-device AI'} • private • works offline';
           bg = Colors.green.shade50;
           icon = Icons.check_circle;
-        } else if (r.appleAvailable) {
-          text = 'Apple Intelligence on-device • private';
+        } else if (r.primary == AeroEngine.apple) {
+          text = 'Apple Intelligence • on-device • private';
           bg = Colors.deepPurple.shade50;
           icon = Icons.auto_awesome;
+        } else if (r.primary == AeroEngine.ollama) {
+          text = 'Home server • ${AeroSettings.ollamaModel}';
+          bg = Colors.orange.shade50;
+          icon = Icons.computer;
         } else {
-          text = 'Core instant • download ~640 MB once for full offline AI';
+          text = 'Set up on-device AI • one-time ${r.recommendedModel.sizeLabel} download';
           bg = Colors.grey.shade100;
-          icon = Icons.memory;
-          action = TextButton(onPressed: _startDownload, child: const Text('Download', style: TextStyle(fontSize: 11)));
+          icon = Icons.bolt;
+          action = TextButton(onPressed: () => _download(r.recommendedModel), child: const Text('Set up', style: TextStyle(fontSize: 11)));
         }
         return Container(
           color: bg,
@@ -4143,6 +4575,26 @@ class _AiChatTabState extends State<AiChatTab> {
         );
       },
     );
+  }
+
+  Widget _welcomeCard() {
+    final needsProfile = AeroSettings.userName.trim().isEmpty;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      _bubble(AeroMessage(isUser: false, text: _welcome)),
+      Padding(
+        padding: const EdgeInsets.only(top: 4, bottom: 8),
+        child: Wrap(spacing: 8, runSpacing: 6, children: [
+          if (needsProfile)
+            ActionChip(
+              avatar: const Icon(Icons.person_outline, size: 16),
+              label: const Text('Personalize AERO', style: TextStyle(fontSize: 12)),
+              onPressed: _showProfile,
+            ),
+          if (_router.messages.isEmpty)
+            ..._suggestions.map((s) => ActionChip(label: Text(s, style: const TextStyle(fontSize: 12)), onPressed: () => _send(s))),
+        ]),
+      ),
+    ]);
   }
 
   Widget _bubble(AeroMessage msg) {
@@ -4166,11 +4618,11 @@ class _AiChatTabState extends State<AiChatTab> {
             ? Row(mainAxisSize: MainAxisSize.min, children: [
                 const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
                 const SizedBox(width: 8),
-                Text(_router.primary == AeroEngine.tinyllama ? 'Loading model… first answer can take ~20 s' : 'AERO thinking…',
+                Text(_router.primary == AeroEngine.local ? 'Thinking… (the first answer after opening takes a moment)' : 'Thinking…',
                     style: const TextStyle(fontSize: 12, color: Colors.grey)),
               ])
             : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                SelectableText(msg.text, style: TextStyle(color: isUser ? Colors.white : Colors.black87, fontSize: 13)),
+                SelectableText(msg.text, style: TextStyle(color: isUser ? Colors.white : Colors.black87, fontSize: 14, height: 1.35)),
                 if (!isUser && msg.engine != null) ...[
                   const SizedBox(height: 6),
                   Row(mainAxisSize: MainAxisSize.min, children: [
@@ -4197,19 +4649,20 @@ class _AiChatTabState extends State<AiChatTab> {
           appBar: AppBar(
             title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               const Text('AERO', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-              Text(_router.detecting ? 'Detecting engines…' : _router.engineLabel, style: const TextStyle(fontSize: 10, color: Colors.grey)),
+              Text(_router.detecting ? 'Getting ready…' : _router.engineLabel, style: const TextStyle(fontSize: 10, color: Colors.grey)),
             ]),
             actions: [
-              IconButton(icon: const Icon(Icons.auto_awesome, size: 18), tooltip: 'Architecture', onPressed: _showAeroArchitecture),
-              IconButton(icon: const Icon(Icons.settings, size: 18), tooltip: 'Engines', onPressed: _showAeroSettings),
+              IconButton(icon: const Icon(Icons.person_outline, size: 20), tooltip: 'Personalize', onPressed: _showProfile),
+              IconButton(icon: const Icon(Icons.auto_awesome, size: 18), tooltip: 'How AERO thinks', onPressed: _showAeroArchitecture),
+              IconButton(icon: const Icon(Icons.settings, size: 18), tooltip: 'AERO settings', onPressed: _showAeroSettings),
               PopupMenuButton<String>(
                 onSelected: (v) {
                   if (v == 'clear') _router.clear();
                   if (v == 'detect') _router.detect(force: true);
                 },
                 itemBuilder: (c) => const [
-                  PopupMenuItem(value: 'detect', child: Text('Re-detect engines')),
-                  PopupMenuItem(value: 'clear', child: Text('Clear chat')),
+                  PopupMenuItem(value: 'clear', child: Text('New conversation')),
+                  PopupMenuItem(value: 'detect', child: Text('Re-check engines')),
                 ],
               ),
             ],
@@ -4222,7 +4675,7 @@ class _AiChatTabState extends State<AiChatTab> {
                 padding: const EdgeInsets.all(12),
                 itemCount: msgs.length + 1,
                 itemBuilder: (ctx, idx) {
-                  if (idx == 0) return _bubble(AeroMessage(isUser: false, text: _welcome));
+                  if (idx == 0) return _welcomeCard();
                   return _bubble(msgs[idx - 1]);
                 },
               ),
@@ -4239,8 +4692,9 @@ class _AiChatTabState extends State<AiChatTab> {
                       minLines: 1,
                       maxLines: 4,
                       textInputAction: TextInputAction.send,
+                      textCapitalization: TextCapitalization.sentences,
                       decoration: InputDecoration(
-                        hintText: 'Ask AERO — Bible, habits, writing, time…',
+                        hintText: 'Message AERO…',
                         border: OutlineInputBorder(borderRadius: BorderRadius.circular(24)),
                         isDense: true,
                         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -4261,7 +4715,7 @@ class _AiChatTabState extends State<AiChatTab> {
                   const SizedBox(width: 6),
                   CircleAvatar(
                     backgroundColor: _router.busy ? Colors.grey : Colors.black,
-                    child: IconButton(icon: const Icon(Icons.send, color: Colors.white, size: 18), onPressed: _router.busy ? null : _send),
+                    child: IconButton(icon: const Icon(Icons.send, color: Colors.white, size: 18), onPressed: _router.busy ? null : () => _send()),
                   ),
                 ]),
               ),
