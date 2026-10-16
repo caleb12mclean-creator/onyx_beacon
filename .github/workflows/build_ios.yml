@@ -9,11 +9,21 @@ on:
 jobs:
   build:
     name: Build iOS Release
-    runs-on: macos-latest
+    # macos-26 has Xcode 26 = iOS 26 SDK, which Apple Intelligence (FoundationModels) needs.
+    # macos-latest can point at an older image; then AERO reports "sdkMissing" on the iPhone 17 Pro Max.
+    runs-on: macos-26
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Select newest Xcode 26
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE" ]; then echo "::error::No Xcode 26 on this runner"; ls /Applications | grep Xcode; exit 1; fi
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+          echo "iOS SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -34,6 +44,23 @@ jobs:
       - name: Build iOS App
         run: |
           flutter build ios --release --no-codesign
+
+      - name: Verify AERO native pieces are in the app
+        run: |
+          APP=build/ios/iphoneos/Runner.app
+          echo "Frameworks bundled:"; ls "$APP/Frameworks"
+          # Fails the build if the Apple Intelligence bridge did not compile in (Swift file missing from the Xcode project).
+          if strings "$APP/Runner" | grep -q "com.onyxbeacon/aero"; then
+            echo "OK: Apple Intelligence bridge compiled in"
+          else
+            echo "::error::AeroAppleAI.swift is not in the app binary - check ios/Runner.xcodeproj/project.pbxproj was committed"; exit 1
+          fi
+          if otool -l "$APP/Runner" | grep -A2 LC_LOAD_WEAK_DYLIB | grep -q FoundationModels; then
+            echo "OK: FoundationModels weak-linked (safe on iOS 18 devices)"
+          else
+            echo "::warning::FoundationModels not weak-linked - check OTHER_LDFLAGS in project.pbxproj"
+          fi
+          if ls "$APP/Frameworks" | grep -qi fllama; then echo "OK: fllama (TinyLlama engine) bundled"; else echo "::warning::fllama framework not found in Frameworks"; fi
 
       - name: Package into IPA for Sideloadly
         run: |

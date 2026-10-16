@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- App Groups for home_widget - Onyx Beacon widgets -->
+	<key>com.apple.developer.app-groups</key>
+	<array>
+		<string>group.onyxbeacon</string>
+	</array>
+	<!-- Apple Intelligence Foundation Models - Free on-device AI (iOS 18+, iPhone 15 Pro+) -->
+	<key>com.apple.developer.foundation-models</key>
+	<true/>
+	<!-- Apple Intelligence - optional, for writing tools -->
+	<key>com.apple.developer.apple-intelligence</key>
+	<true/>
+	<!-- Associated domains if you add P2P later -->
+	<!-- <key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:onyxbeacon.app</string>
+	</array> -->
+</dict>
+</plist>

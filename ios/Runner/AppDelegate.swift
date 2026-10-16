@@ -12,5 +12,9 @@ import UIKit
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    // AERO Engine 2 — Apple Intelligence bridge (channel com.onyxbeacon/aero).
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "AeroAppleAIPlugin") {
+      AeroAppleAIPlugin.register(with: registrar)
+    }
   }
 }

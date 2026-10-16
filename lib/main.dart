@@ -3776,7 +3776,7 @@ class _GalleryTabState extends State<GalleryTab> {
       final dir = await getApplicationDocumentsDirectory();
       final gDir = Directory(path.join(dir.path, 'AERO', 'gallery'));
       if(!await gDir.exists()) await gDir.create(recursive:true);
-      final files = gDir.listSync().where((f)=>f.path.endsWith(".jpg")||f.path.endsWith(".png")||f.path.endsWith(".jpeg")).toList();
+      final files = gDir.listSync().where((f){ final l=f.path.toLowerCase(); return l.endsWith(".jpg")||l.endsWith(".png")||l.endsWith(".jpeg"); }).toList();
       if(mounted) setState(()=>_images = files.map((e)=>e.path).toList()..sort((a,b)=>b.compareTo(a)));
     } catch(_){}
   }
@@ -3792,6 +3792,10 @@ class _GalleryTabState extends State<GalleryTab> {
       await _loadGallery();
     } catch(e){ if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Camera: $e"))); }
   }
+  // Camera exists only on phones. On Windows/macOS/Linux image_picker has no camera, so desktop
+  // gets a file picker instead of a "Take Picture" button that can only fail.
+  bool get _hasCamera => Platform.isIOS || Platform.isAndroid;
+
   Future<void> _pickFromPhone() async {
     try {
       final XFile? img = await _picker.pickImage(source: ImageSource.gallery);
@@ -3799,20 +3803,28 @@ class _GalleryTabState extends State<GalleryTab> {
       final dir = await getApplicationDocumentsDirectory();
       final gDir = Directory(path.join(dir.path, 'AERO', 'gallery'));
       if(!await gDir.exists()) await gDir.create(recursive:true);
-      final name = "onyx_phone_${DateTime.now().millisecondsSinceEpoch}.jpg";
+      final ext = path.extension(img.path).toLowerCase();
+      final keepExt = (ext == '.png' || ext == '.jpeg' || ext == '.jpg') ? ext : '.jpg';
+      final name = "onyx_${_hasCamera ? 'phone' : 'pc'}_${DateTime.now().millisecondsSinceEpoch}$keepExt";
       await File(img.path).copy(path.join(gDir.path, name));
       await _loadGallery();
-    } catch(_){}
+    } catch(e){
+      if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Couldn't add photo: $e")));
+    }
   }
   @override
   Widget build(BuildContext context){
     return Scaffold(
-      appBar: AppBar(title: const Text("Gallery — In-App + Phone"), actions:[
-        IconButton(icon: const Icon(Icons.photo_library), tooltip: "Add from phone gallery", onPressed: _pickFromPhone),
+      appBar: AppBar(title: const Text("Gallery"), actions:[
+        if(_hasCamera) IconButton(icon: const Icon(Icons.photo_library), tooltip: "Add from phone gallery", onPressed: _pickFromPhone),
         IconButton(icon: const Icon(Icons.refresh), onPressed: _loadGallery),
       ]),
-      floatingActionButton: FloatingActionButton.extended(onPressed: _takePicture, icon: const Icon(Icons.camera_alt), label: const Text("Take Picture")),
-      body: _images.isEmpty ? const Center(child: Text("No pictures yet.\n• Take with phone camera\n• Add from phone gallery\n• Saved offline AERO/gallery", textAlign: TextAlign.center)) :
+      floatingActionButton: _hasCamera
+          ? FloatingActionButton.extended(onPressed: _takePicture, icon: const Icon(Icons.camera_alt), label: const Text("Take Picture"))
+          : FloatingActionButton.extended(onPressed: _pickFromPhone, icon: const Icon(Icons.add_photo_alternate), label: const Text("Add Photo")),
+      body: _images.isEmpty ? Center(child: Text(_hasCamera
+          ? "No pictures yet.\n• Take one with the camera\n• Or add from your photo library\nSaved offline in AERO/gallery"
+          : "No pictures yet.\nTap Add Photo to pick an image file.\nSaved offline in AERO/gallery", textAlign: TextAlign.center)) :
       GridView.builder(padding: const EdgeInsets.all(8), gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount:3, crossAxisSpacing:6, mainAxisSpacing:6), itemCount: _images.length, itemBuilder: (ctx,i)=>ClipRRect(borderRadius: BorderRadius.circular(12), child: Image.file(File(_images[i]), fit: BoxFit.cover))),
     );
   }
