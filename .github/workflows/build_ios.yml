@@ -49,13 +49,16 @@ jobs:
         run: |
           APP=build/ios/iphoneos/Runner.app
           echo "Frameworks bundled:"; ls "$APP/Frameworks"
+          # Dump readable text once to a file (piping straight into grep -q made strings print "failed to flush output").
+          # Note: Swift keeps literals of 15 bytes or less inside the machine code, so only longer text can be checked here.
+          strings "$APP/Runner" > runner_strings.txt
           # Fails the build if the Apple Intelligence bridge did not compile in (Swift file missing from the Xcode project).
-          if strings "$APP/Runner" | grep -q "com.onyxbeacon/aero"; then
+          if grep -q "com.onyxbeacon/aero" runner_strings.txt; then
             echo "OK: Apple Intelligence bridge compiled in"
           else
             echo "::error::AeroAppleAI.swift is not in the app binary - check ios/Runner.xcodeproj/project.pbxproj was committed"; exit 1
           fi
-          if strings "$APP/Runner" | grep -q "placesSearch"; then
+          if grep -q "AeroLocationFetcher" runner_strings.txt || grep -q "places search failed" runner_strings.txt; then
             echo "OK: Apple Maps places search compiled in"
           else
             echo "::error::Places search is missing from the app binary - check ios/Runner/AeroAppleAI.swift was committed"; exit 1
